@@ -213,6 +213,9 @@ func runChatSession(ctx context.Context, core *AgentCore, peerID string) error {
 		fmt.Print("You: ") // Prompt for next input
 	})
 
+	// Ensure sender is started (in case OnOpen event was missed)
+	session.Transport.EnsureSenderStarted()
+
 	// Set up stdin reader for sending messages
 	go func() {
 		scanner := bufio.NewScanner(os.Stdin)

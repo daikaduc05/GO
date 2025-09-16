@@ -38,6 +38,7 @@ type Transport interface {
 	SendText(string) error
 	SendJSON(interface{}) error
 	SendBytes([]byte) error
+	EnsureSenderStarted()
 	Close() error
 }
 
@@ -48,7 +49,6 @@ type BaseTransport struct {
 	outboxQueue    chan []byte
 	senderCtx      context.Context
 	senderCancel   context.CancelFunc
-	stdinCtx       context.Context
 	stdinCancel    context.CancelFunc
 	maxQueueSize   int
 	shutdownCtx    context.Context
@@ -83,7 +83,7 @@ func (bt *BaseTransport) AttachChannel(channel *webrtc.DataChannel) {
 
 	// Set up channel event handlers
 	channel.OnOpen(func() {
-		bt.logger.Info("Data channel opened")
+		bt.logger.Info("Data channel opened - OnOpen event triggered")
 		bt.startSender() // Always start sender
 		// Don't start stdin reader automatically - let chat session handle it
 	})
@@ -106,6 +106,9 @@ func (bt *BaseTransport) AttachChannel(channel *webrtc.DataChannel) {
 		bt.logger.Info("Channel already open, triggering open event manually")
 		bt.startSender() // Always start sender
 		// Don't start stdin reader automatically
+	} else {
+		// Channel not open yet, but ensure sender will start when it opens
+		bt.logger.WithField("state", channel.ReadyState().String()).Info("Channel not open yet, waiting for OnOpen event")
 	}
 }
 
@@ -150,7 +153,10 @@ func (bt *BaseTransport) handleChannelMessage(data []byte) {
 
 // startSender starts background task to send queued messages
 func (bt *BaseTransport) startSender() {
+	bt.logger.Info("startSender called")
+
 	if bt.senderCtx != nil {
+		bt.logger.Info("Stopping existing sender")
 		bt.senderCancel()
 	}
 
@@ -203,11 +209,11 @@ func (bt *BaseTransport) stopSender() {
 
 // startStdinReader starts background task to read from stdin
 func (bt *BaseTransport) startStdinReader() {
-	if bt.stdinCtx != nil {
+	if bt.stdinCancel != nil {
 		bt.stdinCancel()
 	}
 
-	bt.stdinCtx, bt.stdinCancel = context.WithCancel(bt.shutdownCtx)
+	_, bt.stdinCancel = context.WithCancel(bt.shutdownCtx)
 
 	go func() {
 		defer bt.stdinCancel()
@@ -217,7 +223,7 @@ func (bt *BaseTransport) startStdinReader() {
 
 		for {
 			select {
-			case <-bt.stdinCtx.Done():
+			case <-bt.shutdownCtx.Done():
 				bt.logger.Debug("Stdin reader loop cancelled")
 				return
 			default:
@@ -324,6 +330,25 @@ func (bt *BaseTransport) queueMessage(data []byte) error {
 	}
 }
 
+// EnsureSenderStarted ensures the sender goroutine is running
+func (bt *BaseTransport) EnsureSenderStarted() {
+	bt.mu.RLock()
+	channel := bt.channel
+	bt.mu.RUnlock()
+
+	if channel != nil && channel.ReadyState() == webrtc.DataChannelStateOpen {
+		bt.logger.Info("Channel is open, ensuring sender is started")
+		bt.startSender()
+	} else {
+		bt.logger.WithField("channel_state", func() string {
+			if channel == nil {
+				return "nil"
+			}
+			return channel.ReadyState().String()
+		}).Info("Channel not ready for sender")
+	}
+}
+
 // Close closes transport and cleans up resources
 func (bt *BaseTransport) Close() error {
 	bt.logger.Info("Closing transport")
@@ -385,6 +410,11 @@ func (ct *ChatTransport) SendBytes(data []byte) error {
 	return ct.queueMessage(data)
 }
 
+// EnsureSenderStarted ensures the sender goroutine is running
+func (ct *ChatTransport) EnsureSenderStarted() {
+	ct.BaseTransport.EnsureSenderStarted()
+}
+
 // JSONTransport implements transport for JSON messages
 type JSONTransport struct {
 	*BaseTransport
@@ -428,6 +458,11 @@ func (jt *JSONTransport) SendBytes(data []byte) error {
 	return jt.queueMessage(data)
 }
 
+// EnsureSenderStarted ensures the sender goroutine is running
+func (jt *JSONTransport) EnsureSenderStarted() {
+	jt.BaseTransport.EnsureSenderStarted()
+}
+
 // BytesTransport implements transport for raw binary data
 type BytesTransport struct {
 	*BaseTransport
@@ -458,6 +493,11 @@ func (bt *BytesTransport) SendJSON(obj interface{}) error {
 // SendBytes sends raw bytes
 func (bt *BytesTransport) SendBytes(data []byte) error {
 	return bt.queueMessage(data)
+}
+
+// EnsureSenderStarted ensures the sender goroutine is running
+func (bt *BytesTransport) EnsureSenderStarted() {
+	bt.BaseTransport.EnsureSenderStarted()
 }
 
 // CreateTransport creates a transport instance based on mode
@@ -522,10 +562,19 @@ func (ctw *ChatTransportWrapper) AttachChannel(channel *webrtc.DataChannel) {
 	if channel.ReadyState() == webrtc.DataChannelStateOpen {
 		ctw.logger.Info("Channel already open, triggering open event manually (chat mode)")
 		ctw.startSender() // Only start sender, not stdin reader
+	} else {
+		// Channel not open yet, but ensure sender will start when it opens
+		ctw.logger.WithField("state", channel.ReadyState().String()).Info("Channel not open yet, waiting for OnOpen event (chat mode)")
 	}
+}
+
+// EnsureSenderStarted ensures the sender goroutine is running
+func (ctw *ChatTransportWrapper) EnsureSenderStarted() {
+	ctw.BaseTransport.EnsureSenderStarted()
 }
 
 // isValidUTF8 checks if data is valid UTF-8
 func isValidUTF8(data []byte) bool {
 	return len(data) == len(string(data))
+
 }
