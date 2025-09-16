@@ -158,15 +158,23 @@ func (bt *BaseTransport) startSender() {
 
 	go func() {
 		defer bt.senderCancel()
+		bt.logger.Info("Sender goroutine started")
 
 		for {
 			select {
 			case <-bt.senderCtx.Done():
-				bt.logger.Debug("Sender loop cancelled")
+				bt.logger.Info("Sender loop cancelled")
 				return
 			case message := <-bt.outboxQueue:
+				bt.logger.WithFields(logrus.Fields{
+					"message": string(message),
+					"length":  len(message),
+				}).Info("Processing message from queue")
+
 				if err := bt.sendRaw(message); err != nil {
 					bt.logger.WithError(err).Error("Error in sender loop")
+				} else {
+					bt.logger.Info("Message sent successfully via data channel")
 				}
 			case <-time.After(time.Second):
 				// Timeout to check if channel is still open
@@ -175,7 +183,7 @@ func (bt *BaseTransport) startSender() {
 				bt.mu.RUnlock()
 
 				if channel == nil || channel.ReadyState() != webrtc.DataChannelStateOpen {
-					bt.logger.Debug("Channel closed, stopping sender")
+					bt.logger.Info("Channel closed, stopping sender")
 					return
 				}
 			}
@@ -257,11 +265,30 @@ func (bt *BaseTransport) sendRaw(data []byte) error {
 	channel := bt.channel
 	bt.mu.RUnlock()
 
+	bt.logger.WithFields(logrus.Fields{
+		"data":        string(data),
+		"length":      len(data),
+		"channel_nil": channel == nil,
+		"channel_state": func() string {
+			if channel == nil {
+				return "nil"
+			}
+			return channel.ReadyState().String()
+		}(),
+	}).Info("sendRaw called")
+
 	if channel == nil || channel.ReadyState() != webrtc.DataChannelStateOpen {
+		bt.logger.Error("Data channel not available or not open")
 		return &TransportError{Message: "Data channel not available or not open"}
 	}
 
-	return channel.Send(data)
+	err := channel.Send(data)
+	bt.logger.WithFields(logrus.Fields{
+		"data":  string(data),
+		"error": err,
+	}).Info("channel.Send result")
+
+	return err
 }
 
 // queueMessage queues a message for sending
