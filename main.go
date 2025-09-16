@@ -147,7 +147,7 @@ func runOfferer(ctx context.Context, core *AgentCore, peerID string) error {
 			session := core.GetSession(peerID)
 			if session != nil && session.IsConnected() {
 				logrus.WithField("peer_id", peerID).Info("Connected to peer")
-				break
+				goto connected // Break out of the entire loop
 			}
 
 			if time.Since(startTime) > timeout {
@@ -157,6 +157,8 @@ func runOfferer(ctx context.Context, core *AgentCore, peerID string) error {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
+
+connected:
 
 	// Wait for shutdown signal
 	<-ctx.Done()

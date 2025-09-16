@@ -36,11 +36,26 @@ func (ps *PeerSession) IsConnected() bool {
 	defer ps.mu.RUnlock()
 
 	if ps.PC == nil || ps.DataChannel == nil {
+		logrus.WithFields(logrus.Fields{
+			"peer_id":        ps.PeerID,
+			"pc_nil":         ps.PC == nil,
+			"datachannel_nil": ps.DataChannel == nil,
+		}).Debug("Connection check: PC or DataChannel is nil")
 		return false
 	}
 
-	return ps.PC.ConnectionState() == webrtc.PeerConnectionStateConnected &&
-		ps.DataChannel.ReadyState() == webrtc.DataChannelStateOpen
+	pcState := ps.PC.ConnectionState()
+	dcState := ps.DataChannel.ReadyState()
+	
+	logrus.WithFields(logrus.Fields{
+		"peer_id":           ps.PeerID,
+		"pc_state":          pcState.String(),
+		"datachannel_state": dcState.String(),
+		"connected":         pcState == webrtc.PeerConnectionStateConnected && dcState == webrtc.DataChannelStateOpen,
+	}).Debug("Connection state check")
+
+	return pcState == webrtc.PeerConnectionStateConnected &&
+		dcState == webrtc.DataChannelStateOpen
 }
 
 // GetStats returns session statistics
@@ -308,6 +323,14 @@ func (ac *AgentCore) ConnectTo(peerID string) error {
 
 	session.DataChannel = dataChannel
 	session.Transport.AttachChannel(dataChannel)
+	
+	// Add data channel state change logging for offerer
+	dataChannel.OnOpen(func() {
+		ac.logger.WithField("peer_id", peerID).Info("Data channel opened (offerer)")
+	})
+	dataChannel.OnClose(func() {
+		ac.logger.WithField("peer_id", peerID).Info("Data channel closed (offerer)")
+	})
 
 	// Set up ICE candidate handler (trickle ICE - send each candidate immediately)
 	session.PC.OnICECandidate(func(candidate *webrtc.ICECandidate) {
@@ -430,6 +453,14 @@ func (ac *AgentCore) createPeerSession(peerID string, isOfferer bool) error {
 
 			session.DataChannel = dc
 			session.Transport.AttachChannel(dc)
+			
+			// Add data channel state change logging
+			dc.OnOpen(func() {
+				ac.logger.WithField("peer_id", peerID).Info("Data channel opened")
+			})
+			dc.OnClose(func() {
+				ac.logger.WithField("peer_id", peerID).Info("Data channel closed")
+			})
 		})
 	}
 
