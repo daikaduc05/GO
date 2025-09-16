@@ -199,20 +199,20 @@ func runChatSession(ctx context.Context, core *AgentCore, peerID string) error {
 	fmt.Println("🚪 Type 'quit' to exit")
 	fmt.Println(strings.Repeat("-", 50))
 	fmt.Print("You: ")
-	
+
 	// Get the session
 	session := core.GetSession(peerID)
 	if session == nil {
 		return fmt.Errorf("session not found for peer %s", peerID)
 	}
-	
+
 	// Set up custom message handler for better chat display
 	session.Transport.OnMessage(func(data []byte) {
 		message := string(data)
 		fmt.Printf("\n[%s] %s\n", peerID, message)
 		fmt.Print("You: ") // Prompt for next input
 	})
-	
+
 	// Set up stdin reader for sending messages
 	go func() {
 		scanner := bufio.NewScanner(os.Stdin)
@@ -226,7 +226,7 @@ func runChatSession(ctx context.Context, core *AgentCore, peerID string) error {
 					fmt.Println("\n👋 Exiting chat session...")
 					return
 				}
-				
+
 				if message != "" {
 					// Send message via transport
 					if err := session.Transport.SendText(message); err != nil {
@@ -242,7 +242,7 @@ func runChatSession(ctx context.Context, core *AgentCore, peerID string) error {
 			}
 		}
 	}()
-	
+
 	// Wait for shutdown signal
 	<-ctx.Done()
 	fmt.Println("\n🔚 Chat session shutting down")

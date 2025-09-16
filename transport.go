@@ -416,14 +416,62 @@ func CreateTransport(mode string) Transport {
 
 	switch mode {
 	case "chat":
-		return NewChatTransport(maxQueueSize)
+		return NewChatTransportWrapper(maxQueueSize)
 	case "json":
 		return NewJSONTransport(maxQueueSize)
 	case "bytes":
 		return NewBytesTransport(maxQueueSize)
 	default:
 		// Default to chat transport
-		return NewChatTransport(maxQueueSize)
+		return NewChatTransportWrapper(maxQueueSize)
+	}
+}
+
+// ChatTransportWrapper is a wrapper around ChatTransport that disables automatic stdin reading
+type ChatTransportWrapper struct {
+	*ChatTransport
+}
+
+// NewChatTransportWrapper creates a new chat transport wrapper
+func NewChatTransportWrapper(maxQueueSize int) *ChatTransportWrapper {
+	chat := NewChatTransport(maxQueueSize)
+	return &ChatTransportWrapper{ChatTransport: chat}
+}
+
+// AttachChannel overrides the base implementation to disable automatic stdin reading
+func (ctw *ChatTransportWrapper) AttachChannel(channel *webrtc.DataChannel) {
+	ctw.mu.Lock()
+	defer ctw.mu.Unlock()
+
+	if ctw.channel != nil {
+		ctw.logger.Warning("Channel already attached, replacing")
+	}
+
+	ctw.channel = channel
+
+	// Set up channel event handlers (but don't start stdin reader)
+	channel.OnOpen(func() {
+		ctw.logger.Info("Data channel opened (chat mode)")
+		ctw.startSender() // Only start sender, not stdin reader
+	})
+
+	channel.OnClose(func() {
+		ctw.logger.Info("Data channel closed (chat mode)")
+		ctw.stopSender()
+		ctw.stopStdinReader()
+	})
+
+	channel.OnMessage(func(msg webrtc.DataChannelMessage) {
+		ctw.handleChannelMessage(msg.Data)
+	})
+
+	ctw.logger.WithField("label", channel.Label()).Info("Attached channel (chat mode)")
+	ctw.logger.WithField("state", channel.ReadyState().String()).Info("Channel ready state")
+
+	// If channel is already open, trigger the open event manually
+	if channel.ReadyState() == webrtc.DataChannelStateOpen {
+		ctw.logger.Info("Channel already open, triggering open event manually (chat mode)")
+		ctw.startSender() // Only start sender, not stdin reader
 	}
 }
 

@@ -37,8 +37,8 @@ func (ps *PeerSession) IsConnected() bool {
 
 	if ps.PC == nil || ps.DataChannel == nil {
 		logrus.WithFields(logrus.Fields{
-			"peer_id":        ps.PeerID,
-			"pc_nil":         ps.PC == nil,
+			"peer_id":         ps.PeerID,
+			"pc_nil":          ps.PC == nil,
 			"datachannel_nil": ps.DataChannel == nil,
 		}).Debug("Connection check: PC or DataChannel is nil")
 		return false
@@ -46,7 +46,7 @@ func (ps *PeerSession) IsConnected() bool {
 
 	pcState := ps.PC.ConnectionState()
 	dcState := ps.DataChannel.ReadyState()
-	
+
 	logrus.WithFields(logrus.Fields{
 		"peer_id":           ps.PeerID,
 		"pc_state":          pcState.String(),
@@ -323,7 +323,7 @@ func (ac *AgentCore) ConnectTo(peerID string) error {
 
 	session.DataChannel = dataChannel
 	session.Transport.AttachChannel(dataChannel)
-	
+
 	// Add data channel state change logging for offerer
 	dataChannel.OnOpen(func() {
 		ac.logger.WithField("peer_id", peerID).Info("Data channel opened (offerer)")
@@ -431,6 +431,9 @@ func (ac *AgentCore) createPeerSession(peerID string, isOfferer bool) error {
 	transport := CreateTransport(ac.settings.Mode)
 	transport.SetDefaultMessageHandler()
 
+	// For chat mode, we'll use custom message handling in runChatSession
+	// Don't start transport's stdin reader to avoid conflicts
+
 	// Create session
 	session := &PeerSession{
 		PeerID:    peerID,
@@ -453,13 +456,13 @@ func (ac *AgentCore) createPeerSession(peerID string, isOfferer bool) error {
 
 			session.DataChannel = dc
 			session.Transport.AttachChannel(dc)
-			
+
 			// Add data channel state change logging
 			dc.OnOpen(func() {
-				ac.logger.WithField("peer_id", peerID).Info("Data channel opened")
+				ac.logger.WithField("peer_id", peerID).Info("Data channel opened (answerer)")
 			})
 			dc.OnClose(func() {
-				ac.logger.WithField("peer_id", peerID).Info("Data channel closed")
+				ac.logger.WithField("peer_id", peerID).Info("Data channel closed (answerer)")
 			})
 		})
 	}
