@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -160,10 +162,9 @@ func runOfferer(ctx context.Context, core *AgentCore, peerID string) error {
 
 connected:
 
-	// Wait for shutdown signal
-	<-ctx.Done()
-	logrus.Info("Offerer shutting down")
-	return nil
+	// Start interactive chat session
+	logrus.WithField("peer_id", peerID).Info("Starting interactive chat session")
+	return runChatSession(ctx, core, peerID)
 }
 
 // runAnswerer runs in answerer mode (listens for connections)
@@ -179,18 +180,73 @@ func runAnswerer(ctx context.Context, core *AgentCore) error {
 			sessions := core.GetAllSessions()
 			for peerID, session := range sessions {
 				if session.IsConnected() {
-					logrus.WithField("peer_id", peerID).Info("Peer connected, starting interactive session")
-
-					// Wait for shutdown signal
-					<-ctx.Done()
-					logrus.Info("Answerer shutting down")
-					return nil
+					logrus.WithField("peer_id", peerID).Info("Peer connected, starting interactive chat session")
+					return runChatSession(ctx, core, peerID)
 				}
 			}
 
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
+}
+
+// runChatSession runs the interactive chat session
+func runChatSession(ctx context.Context, core *AgentCore, peerID string) error {
+	fmt.Println("\n" + strings.Repeat("=", 50))
+	fmt.Printf("🎉 CHAT SESSION STARTED WITH %s 🎉\n", peerID)
+	fmt.Println(strings.Repeat("=", 50))
+	fmt.Println("💬 Type your messages and press Enter to send")
+	fmt.Println("🚪 Type 'quit' to exit")
+	fmt.Println(strings.Repeat("-", 50))
+	fmt.Print("You: ")
+	
+	// Get the session
+	session := core.GetSession(peerID)
+	if session == nil {
+		return fmt.Errorf("session not found for peer %s", peerID)
+	}
+	
+	// Set up custom message handler for better chat display
+	session.Transport.OnMessage(func(data []byte) {
+		message := string(data)
+		fmt.Printf("\n[%s] %s\n", peerID, message)
+		fmt.Print("You: ") // Prompt for next input
+	})
+	
+	// Set up stdin reader for sending messages
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				message := scanner.Text()
+				if message == "quit" {
+					fmt.Println("\n👋 Exiting chat session...")
+					return
+				}
+				
+				if message != "" {
+					// Send message via transport
+					if err := session.Transport.SendText(message); err != nil {
+						fmt.Printf("❌ Failed to send message: %v\n", err)
+						fmt.Print("You: ")
+					} else {
+						fmt.Printf("✅ Sent: %s\n", message)
+						fmt.Print("You: ")
+					}
+				} else {
+					fmt.Print("You: ")
+				}
+			}
+		}
+	}()
+	
+	// Wait for shutdown signal
+	<-ctx.Done()
+	fmt.Println("\n🔚 Chat session shutting down")
+	return nil
 }
 
 // Example usage functions for different modes
