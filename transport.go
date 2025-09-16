@@ -84,9 +84,8 @@ func (bt *BaseTransport) AttachChannel(channel *webrtc.DataChannel) {
 	// Set up channel event handlers
 	channel.OnOpen(func() {
 		bt.logger.Info("Data channel opened")
-		fmt.Println("Chat session started. Type 'quit' to exit.")
-		bt.startSender()
-		bt.startStdinReader()
+		bt.startSender() // Always start sender
+		// Don't start stdin reader automatically - let chat session handle it
 	})
 
 	channel.OnClose(func() {
@@ -105,8 +104,8 @@ func (bt *BaseTransport) AttachChannel(channel *webrtc.DataChannel) {
 	// If channel is already open, trigger the open event manually
 	if channel.ReadyState() == webrtc.DataChannelStateOpen {
 		bt.logger.Info("Channel already open, triggering open event manually")
-		bt.startSender()
-		bt.startStdinReader()
+		bt.startSender() // Always start sender
+		// Don't start stdin reader automatically
 	}
 }
 
@@ -135,10 +134,17 @@ func (bt *BaseTransport) handleChannelMessage(data []byte) {
 	handler := bt.messageHandler
 	bt.mu.RUnlock()
 
+	bt.logger.WithFields(logrus.Fields{
+		"data_length": len(data),
+		"data":        string(data),
+		"has_handler": handler != nil,
+	}).Info("handleChannelMessage called")
+
 	if handler != nil {
+		bt.logger.Info("Calling message handler")
 		handler(data)
 	} else {
-		bt.logger.Debug("Message received but no callback registered")
+		bt.logger.Warning("Message received but no callback registered")
 	}
 }
 
@@ -260,10 +266,19 @@ func (bt *BaseTransport) sendRaw(data []byte) error {
 
 // queueMessage queues a message for sending
 func (bt *BaseTransport) queueMessage(data []byte) error {
+	bt.logger.WithFields(logrus.Fields{
+		"data_length": len(data),
+		"data":        string(data),
+		"queue_len":   len(bt.outboxQueue),
+		"queue_cap":   cap(bt.outboxQueue),
+	}).Info("queueMessage called")
+
 	select {
 	case bt.outboxQueue <- data:
+		bt.logger.Info("Message queued successfully")
 		return nil
 	default:
+		bt.logger.Warning("Queue full, trying to drop oldest message")
 		// Queue is full, try to remove oldest message and add new one
 		select {
 		case <-bt.outboxQueue:
@@ -272,9 +287,11 @@ func (bt *BaseTransport) queueMessage(data []byte) error {
 				bt.logger.Warning("Dropped oldest message to make room")
 				return nil
 			default:
+				bt.logger.Error("Still cannot queue message after dropping oldest")
 				return &TransportError{Message: "Outbox queue full, cannot queue message"}
 			}
 		default:
+			bt.logger.Error("Cannot drop oldest message")
 			return &TransportError{Message: "Outbox queue full, cannot queue message"}
 		}
 	}
@@ -313,8 +330,14 @@ func NewChatTransport(maxQueueSize int) *ChatTransport {
 
 // SendText sends UTF-8 text message
 func (ct *ChatTransport) SendText(text string) error {
+	ct.logger.WithField("text", text).Info("SendText called")
 	data := []byte(text)
-	return ct.queueMessage(data)
+	err := ct.queueMessage(data)
+	ct.logger.WithFields(logrus.Fields{
+		"text":  text,
+		"error": err,
+	}).Info("SendText result")
+	return err
 }
 
 // SendJSON sends JSON object as text
@@ -416,14 +439,14 @@ func CreateTransport(mode string) Transport {
 
 	switch mode {
 	case "chat":
-		return NewChatTransportWrapper(maxQueueSize)
+		return NewChatTransport(maxQueueSize) // Use regular ChatTransport for now
 	case "json":
 		return NewJSONTransport(maxQueueSize)
 	case "bytes":
 		return NewBytesTransport(maxQueueSize)
 	default:
 		// Default to chat transport
-		return NewChatTransportWrapper(maxQueueSize)
+		return NewChatTransport(maxQueueSize)
 	}
 }
 
