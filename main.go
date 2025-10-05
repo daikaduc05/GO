@@ -1490,6 +1490,8 @@ func (a *Agent) handleSignalingMessage(msg SignalingMessage) error {
 	switch msg.Type {
 	case "peer":
 		return a.handlePeerMessage(msg)
+	case "peer_online":
+		return a.handlePeerOnline(msg)
 	case "registered":
 		a.logger.Println("Successfully registered with signaling server")
 	case "error":
@@ -1537,6 +1539,40 @@ func (a *Agent) handlePeerMessage(msg SignalingMessage) error {
 	// Start NAT hole punching
 	go a.startNATPunching(peerAddr, msg.VIP)
 
+	return nil
+}
+
+// handlePeerOnline handles simplified online notification and kicks punching
+func (a *Agent) handlePeerOnline(msg SignalingMessage) error {
+	// Some servers send: {type:"peer_online", agent_id:"...", public_ip:"...", public_port: N, virtual_ip:"..."}
+	ip := msg.IP
+	port := msg.Port
+	if ip == "" && msg.PublicIP != "" {
+		ip = msg.PublicIP
+	}
+	if port == 0 && msg.PublicPort != 0 {
+		port = msg.PublicPort
+	}
+	if ip == "" || port == 0 {
+		a.logger.Printf("[PUNCH] peer_online missing ip/port: raw=%s", string(msg.Raw))
+		return nil
+	}
+	peerVIP := msg.VIP
+	if peerVIP == "" {
+		// try to parse from raw as fallback
+		var m map[string]any
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			if v, ok := m["virtual_ip"].(string); ok {
+				peerVIP = v
+			}
+		}
+	}
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", ip, port))
+	if err != nil {
+		return fmt.Errorf("peer_online resolve: %w", err)
+	}
+	a.logger.Printf("[PUNCH] peer_online: public=%s vip=%s; begin punching", addr, peerVIP)
+	go a.startNATPunching(addr, peerVIP)
 	return nil
 }
 
