@@ -216,6 +216,12 @@ type Agent struct {
 	mu             sync.RWMutex
 	logger         *log.Logger
 	stats          *AgentStats
+	// file receive state
+	fileOut     *os.File
+	fileOutPath string
+	fileBytes   int64
+	// transfer intent tracking: VIP -> pending
+	transferPending map[string]bool
 }
 
 // AgentStats holds runtime statistics
@@ -654,13 +660,14 @@ func NewAgent(config *AgentConfig) (*Agent, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	agent := &Agent{
-		config:         config,
-		peerSessions:   make(map[string]*PeerSession),
-		peerMappings:   make(map[string]*net.UDPAddr),
-		shutdownCtx:    ctx,
-		shutdownCancel: cancel,
-		logger:         log.New(os.Stdout, "[AGENT] ", log.LstdFlags),
-		stats:          &AgentStats{},
+		config:          config,
+		peerSessions:    make(map[string]*PeerSession),
+		peerMappings:    make(map[string]*net.UDPAddr),
+		shutdownCtx:     ctx,
+		shutdownCancel:  cancel,
+		logger:          log.New(os.Stdout, "[AGENT] ", log.LstdFlags),
+		stats:           &AgentStats{},
+		transferPending: make(map[string]bool),
 	}
 
 	// Create signaling client
