@@ -1487,6 +1487,20 @@ func (a *Agent) handleSignalingMessage(msg SignalingMessage) error {
 	a.logger.Printf("Received signaling message: type=%q ip=%s port=%d vip=%s agent_id=%s public_ip=%s public_port=%d raw=%s",
 		msg.Type, msg.IP, msg.Port, msg.VIP, msg.AgentID, msg.PublicIP, msg.PublicPort, string(msg.Raw))
 
+	// Check if this is a registered response with status field
+	if msg.Type == "" {
+		// Try to parse as registered response with status field
+		var statusMsg struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(msg.Raw, &statusMsg); err == nil && statusMsg.Status == "registered" {
+			a.logger.Println("Successfully registered with signaling server (status field)")
+			// Parse peers from registered response
+			go a.handleRegisteredWithPeers(msg)
+			return nil
+		}
+	}
+
 	switch msg.Type {
 	case "peer":
 		return a.handlePeerMessage(msg)
@@ -1494,6 +1508,8 @@ func (a *Agent) handleSignalingMessage(msg SignalingMessage) error {
 		return a.handlePeerOnline(msg)
 	case "registered":
 		a.logger.Println("Successfully registered with signaling server")
+		// Parse peers from registered response
+		go a.handleRegisteredWithPeers(msg)
 	case "error":
 		a.logger.Printf("Signaling error: %s raw=%s", msg.Type, string(msg.Raw))
 	default:
@@ -1576,6 +1592,52 @@ func (a *Agent) handlePeerOnline(msg SignalingMessage) error {
 	return nil
 }
 
+// handleRegisteredWithPeers handles registered response with peers list
+func (a *Agent) handleRegisteredWithPeers(msg SignalingMessage) error {
+	a.logger.Printf("Processing registered response with peers: %s", string(msg.Raw))
+
+	// Parse the registered response with peers
+	var registeredResp struct {
+		Status string `json:"status"`
+		Peers  []struct {
+			UserID     int    `json:"user_id"`
+			Email      string `json:"email"`
+			AgentID    string `json:"agent_id"`
+			PublicIP   string `json:"public_ip"`
+			PublicPort int    `json:"public_port"`
+			VirtualIP  string `json:"virtual_ip"`
+		} `json:"peers"`
+	}
+
+	if err := json.Unmarshal(msg.Raw, &registeredResp); err != nil {
+		a.logger.Printf("Failed to parse registered response: %v", err)
+		return err
+	}
+
+	a.logger.Printf("Found %d existing peers in registered response, starting NAT punching to all", len(registeredResp.Peers))
+
+	// Start NAT punching to all existing peers
+	for _, peer := range registeredResp.Peers {
+		if peer.PublicIP == "" || peer.PublicPort == 0 || peer.VirtualIP == "" {
+			a.logger.Printf("Skipping peer with missing info: agent_id=%s public_ip=%s public_port=%d virtual_ip=%s",
+				peer.AgentID, peer.PublicIP, peer.PublicPort, peer.VirtualIP)
+			continue
+		}
+
+		peerAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", peer.PublicIP, peer.PublicPort))
+		if err != nil {
+			a.logger.Printf("Failed to resolve peer %s:%d: %v", peer.PublicIP, peer.PublicPort, err)
+			continue
+		}
+
+		a.logger.Printf("[REGISTERED] Starting NAT punching to existing peer: %s (VIP: %s, AgentID: %s)",
+			peerAddr, peer.VirtualIP, peer.AgentID)
+		go a.startNATPunching(peerAddr, peer.VirtualIP)
+	}
+
+	return nil
+}
+
 // startNATPunching attempts to establish direct UDP connection with peer
 func (a *Agent) startNATPunching(peerAddr *net.UDPAddr, peerVIP string) {
 	a.logger.Printf("Starting NAT punching to %s", peerAddr)
@@ -1586,6 +1648,10 @@ func (a *Agent) startNATPunching(peerAddr *net.UDPAddr, peerVIP string) {
 		case <-a.shutdownCtx.Done():
 			return
 		default:
+			// Log attempt details
+			a.logger.Printf("[PUNCH] try %d/%d -> %s (vip=%s): send HELLO then PING",
+				i+1, a.config.PunchAttempts, peerAddr.String(), peerVIP)
+
 			// Send HELLO
 			helloFrame := UDPFrame{
 				Version:     1,
@@ -1597,7 +1663,10 @@ func (a *Agent) startNATPunching(peerAddr *net.UDPAddr, peerVIP string) {
 			}
 
 			if err := a.sendUDPFrame(helloFrame, peerAddr); err != nil {
-				a.logger.Printf("Error sending HELLO: %v", err)
+				a.logger.Printf("[PUNCH] HELLO send error: %v", err)
+			} else {
+				a.logger.Printf("[PUNCH] HELLO sent -> %s (srcVIP=%s dstVIP=%s)",
+					peerAddr.String(), a.getLocalVIP(), peerVIP)
 			}
 
 			// Send PING
@@ -1611,7 +1680,10 @@ func (a *Agent) startNATPunching(peerAddr *net.UDPAddr, peerVIP string) {
 			}
 
 			if err := a.sendUDPFrame(pingFrame, peerAddr); err != nil {
-				a.logger.Printf("Error sending PING: %v", err)
+				a.logger.Printf("[PUNCH] PING send error: %v", err)
+			} else {
+				a.logger.Printf("[PUNCH] PING sent -> %s (srcVIP=%s dstVIP=%s)",
+					peerAddr.String(), a.getLocalVIP(), peerVIP)
 			}
 
 			// Wait for interval
