@@ -151,7 +151,7 @@ func testInputValidation() {
 		AllowedVIPPattern: `^10\.10\.\d{1,3}\.\d{1,3}$`,
 	}
 
-	sm, err := NewSecurityManager(&config)
+	sm, err := NewSecurityManager(config)
 	if err != nil {
 		log.Printf("Failed to create security manager: %v", err)
 		return
@@ -175,12 +175,12 @@ func testInputValidation() {
 		err := sm.ValidateInput(test.input, test.inputType)
 		if (err == nil) == test.shouldPass {
 			if test.shouldPass {
-				fmt.Printf("  ✅ Valid input accepted: %s\n", test.input)
+				fmt.Printf("  Valid input accepted: %s\n", test.input)
 			} else {
-				fmt.Printf("  ✅ Invalid input rejected: %s\n", test.input)
+				fmt.Printf("  Invalid input rejected: %s\n", test.input)
 			}
 		} else {
-			fmt.Printf("  ❌ Validation failed for: %s (expected: %v, got: %v)\n",
+			fmt.Printf("   Validation failed for: %s (expected: %v, got: %v)\n",
 				test.input, test.shouldPass, err == nil)
 		}
 	}
@@ -197,27 +197,27 @@ func testRateLimiting() {
 	for i := 0; i < 3; i++ {
 		err := rl.Allow(clientID)
 		if err != nil {
-			fmt.Printf("  ❌ Request %d blocked unexpectedly: %v\n", i+1, err)
+			fmt.Printf("  Request %d blocked unexpectedly: %v\n", i+1, err)
 		} else {
-			fmt.Printf("  ✅ Request %d allowed\n", i+1)
+			fmt.Printf("  Request %d allowed\n", i+1)
 		}
 	}
 
 	// Test rate limit
 	err := rl.Allow(clientID)
 	if err == nil {
-		fmt.Printf("  ❌ Rate limit not enforced\n")
+		fmt.Printf("  Rate limit not enforced\n")
 	} else {
-		fmt.Printf("  ✅ Rate limit enforced: %v\n", err)
+		fmt.Printf("  Rate limit enforced: %v\n", err)
 	}
 
 	// Wait and test again
 	time.Sleep(2 * time.Second)
 	err = rl.Allow(clientID)
 	if err != nil {
-		fmt.Printf("  ❌ Rate limit still active after cooldown: %v\n", err)
+		fmt.Printf("  Rate limit still active after cooldown: %v\n", err)
 	} else {
-		fmt.Printf("  ✅ Rate limit reset after cooldown\n")
+		fmt.Printf("  Rate limit reset after cooldown\n")
 	}
 }
 
@@ -235,9 +235,9 @@ func testSecurityAudit() {
 
 	issues := SecurityAudit(secureConfig)
 	if len(issues) == 0 {
-		fmt.Printf("  ✅ Security audit passed - no issues found\n")
+		fmt.Printf("   Security audit passed - no issues found\n")
 	} else {
-		fmt.Printf("  ⚠️  Security audit found %d issues:\n", len(issues))
+		fmt.Printf("   Security audit found %d issues:\n", len(issues))
 		for _, issue := range issues {
 			fmt.Printf("    - %s\n", issue)
 		}

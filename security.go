@@ -45,22 +45,22 @@ type SecurityConfig struct {
 
 // EncryptedUDPFrame represents an encrypted UDP frame
 type EncryptedUDPFrame struct {
-	Version          uint8    `json:"version"`
-	MessageType      uint8    `json:"message_type"`
-	SrcVIP           [4]byte  `json:"src_vip"`
-	DstVIP           [4]byte  `json:"dst_vip"`
-	PayloadLen       uint16   `json:"payload_len"`
-	Nonce            [12]byte `json:"nonce"`
-	AuthTag          [16]byte `json:"auth_tag"`
-	EncryptedPayload []byte   `json:"encrypted_payload"`
+	Version          uint8    `json:"version"`//phiên bản
+	MessageType      uint8    `json:"message_type"`//loại tin nhắn
+	SrcVIP           [4]byte  `json:"src_vip"`//Ip nguồn
+	DstVIP           [4]byte  `json:"dst_vip"`//IP đích
+	PayloadLen       uint16   `json:"payload_len"` 
+	Nonce            [12]byte `json:"nonce"`	//số ngẫu nhiên
+	AuthTag          [16]byte `json:"auth_tag"` //tag xác thực
+	EncryptedPayload []byte   `json:"encrypted_payload"` //dữ liệu đã mã hóa
 }
 
 // AuthToken represents an authentication token with expiration
 type AuthToken struct {
-	Token     string    `json:"token"`
-	ExpiresAt time.Time `json:"expires_at"`
-	Scope     []string  `json:"scope"`
-	UserID    string    `json:"user_id"`
+	Token     string    `json:"token"` //token JWT
+	ExpiresAt time.Time `json:"expires_at"` //thời gian hết hạn
+	Scope     []string  `json:"scope"` // quyền hạn
+	UserID    string    `json:"user_id"` // id người dùng
 	IssuedAt  time.Time `json:"issued_at"`
 }
 
@@ -209,11 +209,11 @@ func (sm *SecurityManager) ValidateInput(input string, inputType string) error {
 
 	// Validate based on input type
 	switch inputType {
-	case "vip":
+	case "vip": //kiểm tra IP đúng format hay không?
 		return sm.validateVIP(input)
-	case "message":
+	case "message": //kiểm tra có chứa mã độc hay ko?
 		return sm.validateMessage(input)
-	case "url":
+	case "url": //kiểm tra url có an toàn không?
 		return sm.validateURL(input)
 	default:
 		return fmt.Errorf("unknown input type: %s", inputType)

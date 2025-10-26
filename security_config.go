@@ -19,13 +19,13 @@ import (
 func DefaultSecurityConfig() *SecurityConfig {
 	return &SecurityConfig{
 		// Encryption settings
-		EncryptionEnabled: true,
-		EncryptionKey:     "", // Will be generated if empty
+		EncryptionEnabled: true, //BẬT MÃ HÓA
+		EncryptionKey:     "", // Will be generated if emptY tạo tự động
 		KeyDerivationSalt: "udp-tun-agent-salt-2024",
 
 		// Authentication settings
-		AuthRequired:     true,
-		TokenExpiry:      24 * time.Hour,
+		AuthRequired:     true, //giới hạn 1 kb
+		TokenExpiry:      24 * time.Hour, 
 		MaxLoginAttempts: 5,
 		LoginCooldown:    15 * time.Minute,
 
@@ -34,7 +34,7 @@ func DefaultSecurityConfig() *SecurityConfig {
 		AllowedVIPPattern: `^10\.10\.\d{1,3}\.\d{1,3}$`,
 
 		// Rate limiting
-		RateLimitEnabled: true,
+		RateLimitEnabled: true, //bật giới hạn tốc độ
 		RateLimitWindow:  1 * time.Minute,
 		RateLimitMax:     60, // 60 requests per minute
 	}
