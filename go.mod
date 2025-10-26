@@ -7,6 +7,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/pion/webrtc/v3 v3.2.40
 	github.com/sirupsen/logrus v1.9.3
+	golang.org/x/crypto v0.21.0
 )
 
 require (

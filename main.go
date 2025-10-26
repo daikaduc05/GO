@@ -156,6 +156,8 @@ type AgentConfig struct {
 	LoginURL string `json:"login_url"`
 	// Optional explicit WebSocket Origin header
 	WSOrigin string `json:"ws_origin"`
+	//Authentication.
+	AuthToken *AuthToken `json:"auth_token"`
 }
 
 // PeerEndpoint represents a peer's network endpoint and virtual IP
@@ -233,6 +235,12 @@ type AgentStats struct {
 	mu          sync.RWMutex
 }
 
+type Certificate struct {
+	CertPath string
+	KeyPath  string
+	CA       string
+}
+
 // ============================================================================
 // MAIN FUNCTION
 // ============================================================================
@@ -292,13 +300,17 @@ func main() {
 
 	// Prompt login if token missing
 	if config.Token == "" {
-		fmt.Println("🔐 Please login to signaling server")
+		fmt.Println("Please login to signaling server")
 		t, err := promptAndLogin(config)
 		if err != nil {
 			log.Fatalf("Login failed: %v", err)
 		}
-		config.Token = t
-		fmt.Println("✅ Login successful")
+		config.AuthToken = &AuthToken{
+			Token:     t,
+			ExpiresAt: time.Now().Add(24 * time.Hour),
+			Scope:     []string{"signaling", "peer-connect"},
+		}
+		fmt.Println("Login successful")
 	}
 
 	// Validate required parameters
