@@ -1,15 +1,54 @@
-# Hướng Dẫn Sử Dụng Go WebRTC Agent
+# Hướng Dẫn Sử Dụng UDP+TUN Agent
+
+## Tổng Quan
+
+Agent UDP+TUN là phiên bản cải tiến thay thế cho WebRTC agent cũ, sử dụng:
+
+- **TUN Interface**: Tạo mạng ảo (10.0.0.0/8) để truyền IP packets
+- **UDP Transport**: Socket UDP thô với NAT traversal
+- **Signaling**: WebSocket để trao đổi endpoint (tương thích với Python server)
+- **NAT Traversal**: UDP hole punching + TURN fallback
 
 ## Cài Đặt và Cấu Hình
 
 ### 1. Cài Đặt Dependencies
 
 ```bash
-go mod tidy
-go build .
+# Cài đặt các thư viện cần thiết
+go get github.com/songgao/water github.com/pion/stun github.com/pion/turn/v2 github.com/gorilla/websocket github.com/joho/godotenv
+
+# Build agent
+go build main.go
 ```
 
-### 2. Cấu Hình File .env
+### 2. Cấu Hình TUN Interface
+
+#### Linux:
+
+```bash
+# Tạo TUN interface (cần quyền sudo)
+sudo ip tuntap add dev tun0 mode tun
+sudo ip addr add 10.10.0.5/24 dev tun0
+sudo ip link set tun0 up
+
+# Hoặc sử dụng script tự động
+sudo ./setup-tun.sh
+```
+
+#### macOS:
+
+```bash
+# TUN interface sẽ được tạo tự động
+# Cấu hình IP (cần quyền sudo)
+sudo ifconfig utun0 10.10.0.5/24
+```
+
+#### Windows:
+
+- Cài đặt Wintun driver từ https://www.wintun.net/
+- Agent sẽ tự động tạo TUN interface
+
+### 3. Cấu Hình File .env
 
 ```bash
 # Copy file cấu hình mẫu
@@ -17,10 +56,14 @@ cp config.env .env
 
 # Chỉnh sửa file .env với thông tin của bạn
 # Ví dụ:
-AGENT_ID=agent-001
+ORG_TOKEN=your-org-token
 SIGNALING_URL=ws://localhost:8000/ws/agent-001
-ICE_URL=stun:stun.l.google.com:19302
-MODE=chat
+VIRTUAL_IP=10.10.0.5/24
+STUN_SERVER=54.151.153.64:3478
+TURN_SERVER=54.151.153.64:3478
+TURN_USER=test
+TURN_PASS=1234
+MTU=1300
 VERBOSE=false
 ```
 
@@ -30,69 +73,113 @@ VERBOSE=false
 
 ```bash
 # Terminal 1: Answerer (người nhận)
-./webrtc-agent.exe -env=.env -listen
+sudo go run main.go -env=.env -listen
 
 # Terminal 2: Offerer (người kết nối)
-./webrtc-agent.exe -env=.env -peer-id=agent-001
+sudo go run main.go -env=.env -peer-id=agent-002
 ```
 
 ### Cách 2: Sử Dụng Command Line
 
 ```bash
 # Terminal 1: Answerer
-./webrtc-agent.exe -agent-id=answerer-001 -signaling-url=ws://localhost:8000/ws/answerer-001 -listen
+sudo go run main.go -signaling-url=ws://localhost:8000/ws/answerer-001 -listen
 
 # Terminal 2: Offerer
-./webrtc-agent.exe -agent-id=offerer-001 -signaling-url=ws://localhost:8000/ws/offerer-001 -peer-id=answerer-001
+sudo go run main.go -signaling-url=ws://localhost:8000/ws/offerer-001 -peer-id=answerer-001
 ```
 
-### Cách 3: Override File .env với Command Line
+### Cách 3: Test Connectivity
 
 ```bash
-# Sử dụng .env nhưng override một số giá trị
-./webrtc-agent.exe -env=.env -agent-id=custom-agent -peer-id=target-peer
+# Test ping đến một VIP cụ thể
+sudo go run main.go -env=.env -ping=10.10.0.6
 ```
 
-## Các Chế Độ Transport
+## Chức Năng Chat
 
-### Chat Mode (Mặc định)
+### Các Lệnh Chat
+
+Khi agent đã kết nối, bạn có thể sử dụng các lệnh sau:
 
 ```bash
-./webrtc-agent.exe -env=.env -mode=chat -listen
+# Broadcast message đến tất cả peers
+Hello everyone!
+
+# Gửi message đến peer cụ thể
+send 10.10.0.6 Hello from 10.10.0.5!
+
+# Test ping
+ping 10.10.0.6
+
+# Thoát
+quit
 ```
 
-### JSON Mode
+### Ví Dụ Chat Session
 
-```bash
-./webrtc-agent.exe -env=.env -mode=json -listen
+```
+🎉 UDP+TUN CHAT SESSION STARTED 🎉
+==================================================
+💬 Type your messages and press Enter to send
+🚪 Type 'quit' to exit
+🔧 Use 'ping <vip>' to test connectivity
+📝 Use 'send <vip> <message>' to send to specific peer
+📢 Type message without prefix to broadcast to all peers
+--------------------------------------------------
+You: Hello everyone!
+✅ Broadcast message: Hello everyone!
+
+[10.10.0.6] Hi there! How are you?
+You: send 10.10.0.6 I'm doing great, thanks!
+✅ Message sent to 10.10.0.6: I'm doing great, thanks!
+
+You: ping 10.10.0.6
+✅ Ping sent to 10.10.0.6
+
+You: quit
+👋 Exiting session...
 ```
 
-### Bytes Mode
+## Cấu Hình Chi Tiết
+
+### Biến Môi Trường
+
+| Biến                   | Mô tả                                    | Mặc định             |
+| ---------------------- | ---------------------------------------- | -------------------- |
+| `ORG_TOKEN`            | Token tổ chức cho signaling              | ""                   |
+| `SIGNALING_URL`        | URL WebSocket signaling server           | **Bắt buộc**         |
+| `ICE_URLS`             | ICE server URLs (stun:...,turn:...)      | ""                   |
+| `ICE_USERNAME`         | Username cho ICE server                  | ""                   |
+| `ICE_CREDENTIAL`       | Password cho ICE server                  | ""                   |
+| `STUN_SERVER`          | STUN server                              | "54.151.153.64:3478" |
+| `TURN_SERVER`          | TURN server                              | "54.151.153.64:3478" |
+| `TURN_USER`            | TURN username                            | "test"               |
+| `TURN_PASS`            | TURN password                            | "1234"               |
+| `VIRTUAL_SUBNET`       | Subnet ảo                                | "10.10.0.0/16"       |
+| `VIRTUAL_IP`           | IP ảo với mask                           | "10.10.0.5/24"       |
+| `UDP_BIND_IP`          | IP bind cho UDP                          | "0.0.0.0"            |
+| `UDP_BIND_PORT`        | Port bind cho UDP                        | "0"                  |
+| `MTU`                  | MTU cho TUN interface                    | 1300                 |
+| `PUNCH_ATTEMPTS`       | Số lần thử NAT punch                     | 20                   |
+| `PUNCH_INTERVAL_MS`    | Khoảng thời gian giữa các lần punch (ms) | 250                  |
+| `KEEPALIVE_INTERVAL_S` | Khoảng thời gian keepalive (s)           | 15                   |
+| `PEER_STALE_TIMEOUT_S` | Timeout cho peer cũ (s)                  | 60                   |
+| `VERBOSE`              | Bật log chi tiết                         | false                |
+
+### Cấu Hình ICE/TURN
 
 ```bash
-./webrtc-agent.exe -env=.env -mode=bytes -listen
-```
+# Sử dụng ICE URLs (khuyến nghị)
+ICE_URLS=stun:54.151.153.64:3478,turn:54.151.153.64:3478?transport=udp
+ICE_USERNAME=test
+ICE_CREDENTIAL=1234
 
-## Cấu Hình ICE Servers
-
-### STUN Server (Mặc định)
-
-```bash
-ICE_URL=stun:stun.l.google.com:19302
-```
-
-### Multiple ICE Servers
-
-```bash
-ICE_URLS=stun:stun1.l.google.com:19302,stun:stun2.l.google.com:19302
-```
-
-### TURN Server với Authentication
-
-```bash
-ICE_URL=turn:turn.server.com:3478
-ICE_USERNAME=your-username
-ICE_CREDENTIAL=your-password
+# Hoặc cấu hình riêng lẻ
+STUN_SERVER=54.151.153.64:3478
+TURN_SERVER=54.151.153.64:3478
+TURN_USER=test
+TURN_PASS=1234
 ```
 
 ## Ví Dụ Thực Tế
@@ -101,92 +188,130 @@ ICE_CREDENTIAL=your-password
 
 ```bash
 # File .env
-AGENT_ID=chat-agent-001
 SIGNALING_URL=ws://localhost:8000/ws/chat-agent-001
-MODE=chat
+VIRTUAL_IP=10.10.0.5/24
 
 # Terminal 1: Answerer
-./webrtc-agent.exe -env=.env -listen
+sudo go run main.go -env=.env -listen
 
 # Terminal 2: Offerer
-./webrtc-agent.exe -env=.env -peer-id=chat-agent-001
+sudo go run main.go -env=.env -peer-id=chat-agent-002
 ```
 
-### Ví Dụ 2: JSON Communication
+### Ví Dụ 2: Với Custom TURN Server
 
 ```bash
 # File .env
-AGENT_ID=json-agent-001
-SIGNALING_URL=ws://localhost:8000/ws/json-agent-001
-MODE=json
-
-# Terminal 1: Answerer
-./webrtc-agent.exe -env=.env -listen
-
-# Terminal 2: Offerer
-./webrtc-agent.exe -env=.env -peer-id=json-agent-001
-```
-
-### Ví Dụ 3: Với Custom ICE Server
-
-```bash
-# File .env
-AGENT_ID=agent-001
 SIGNALING_URL=ws://localhost:8000/ws/agent-001
-ICE_URL=stun:stun.l.google.com:19302
-ICE_USERNAME=
-ICE_CREDENTIAL=
-MODE=chat
+TURN_SERVER=your-turn-server.com:3478
+TURN_USER=your-username
+TURN_PASS=your-password
+VIRTUAL_IP=10.10.0.5/24
 
-# Terminal 1: Answerer
-./webrtc-agent.exe -env=.env -listen
+# Chạy agent
+sudo go run main.go -env=.env -listen
+```
 
-# Terminal 2: Offerer
-./webrtc-agent.exe -env=.env -peer-id=agent-001
+### Ví Dụ 3: Test Connectivity
+
+```bash
+# Test ping đến peer
+sudo go run main.go -env=.env -ping=10.10.0.6
+
+# Test với verbose logging
+sudo go run main.go -env=.env -ping=10.10.0.6 -verbose
 ```
 
 ## Troubleshooting
 
-### Lỗi "agent-id is required"
-
-- Kiểm tra file .env có AGENT_ID không
-- Hoặc sử dụng flag `-agent-id=your-id`
-
 ### Lỗi "signaling-url is required"
 
-- Kiểm tra file .env có SIGNALING_URL không
+- Kiểm tra file .env có `SIGNALING_URL` không
 - Hoặc sử dụng flag `-signaling-url=ws://...`
 
-### Lỗi "peer-id is required for offerer mode"
+### Lỗi "no peer mapping for VIP"
 
-- Sử dụng flag `-peer-id=target-peer-id` khi chạy offerer
-- Hoặc sử dụng `-listen` để chạy answerer
+- Peer chưa được kết nối
+- Kiểm tra NAT punching có thành công không
+- Thử sử dụng TURN server
+
+### Lỗi "failed to create TUN interface"
+
+- **Linux/macOS**: Cần quyền sudo
+- **Windows**: Cài đặt Wintun driver
+- Kiểm tra TUN interface đã tồn tại chưa
 
 ### Không kết nối được
 
 - Kiểm tra signaling server có chạy không
-- Kiểm tra URL trong SIGNALING_URL có đúng không
 - Kiểm tra firewall/network
+- Thử sử dụng TURN server thay vì direct connection
 
-## So Sánh với Python Version
+### Lỗi "STUN discovery failed"
 
-### Ưu Điểm của Go Version
+- Kiểm tra STUN server có accessible không
+- Kiểm tra network connectivity
+- Agent vẫn hoạt động với local endpoint
 
-1. **Trickle ICE**: Kết nối nhanh hơn, gửi offer/answer ngay lập tức
-2. **Performance**: Hiệu suất cao hơn, ít tài nguyên hơn
-3. **Type Safety**: Kiểm tra lỗi tại compile time
-4. **Concurrency**: Xử lý đồng thời tốt hơn với goroutines
+## So Sánh với WebRTC Cũ
+
+### Ưu Điểm của UDP+TUN Agent
+
+1. **Đơn Giản Hơn**: Không cần WebRTC stack phức tạp
+2. **Hiệu Suất Cao**: Latency thấp hơn, ít overhead
+3. **Debug Dễ Dàng**: Có thể inspect raw packets
+4. **Kiểm Soát Tốt**: Direct control over network layer
+5. **Cross-Platform**: TUN libraries có sẵn cho mọi OS
 
 ### Tương Thích
 
-- Hoàn toàn tương thích với Python signaling server
-- Có thể kết nối giữa Go agent và Python agent
-- Cùng protocol signaling
+- **Signaling**: Hoàn toàn tương thích với Python signaling server
+- **Protocol**: Sử dụng cùng JSON message format
+- **NAT Traversal**: UDP hole punching + TURN fallback
+
+### Migration từ WebRTC
+
+| WebRTC Component        | UDP+TUN Equivalent         |
+| ----------------------- | -------------------------- |
+| RTCPeerConnection       | UDP socket + peer mapping  |
+| DataChannel.Send()      | udpSendData()              |
+| DataChannel.OnMessage() | udpReceiveData() → TUN     |
+| ICE candidates          | STUN discovery + signaling |
+| TURN relay              | Direct TURN client         |
 
 ## Help Command
 
 ```bash
-./webrtc-agent.exe -help
+go run main.go -help
 ```
 
 Sẽ hiển thị thông tin chi tiết về các biến môi trường và cách sử dụng.
+
+## Scripts Hỗ Trợ
+
+### setup-tun.sh (Linux)
+
+```bash
+#!/bin/bash
+# Tạo TUN interface cho Linux
+sudo ip tuntap add dev tun0 mode tun
+sudo ip addr add 10.10.0.5/24 dev tun0
+sudo ip link set tun0 up
+echo "TUN interface created: tun0"
+```
+
+### cleanup-tun.sh (Linux)
+
+```bash
+#!/bin/bash
+# Xóa TUN interface
+sudo ip link delete tun0
+echo "TUN interface deleted"
+```
+
+## Performance Tips
+
+1. **MTU**: Sử dụng MTU 1300 để tránh fragmentation
+2. **Punch Interval**: Tăng `PUNCH_INTERVAL_MS` nếu network chậm
+3. **Keepalive**: Điều chỉnh `KEEPALIVE_INTERVAL_S` theo nhu cầu
+4. **TURN**: Sử dụng TURN server gần để giảm latency
