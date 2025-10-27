@@ -61,10 +61,9 @@ QUICK START:
    sudo ip addr add 10.10.0.5/24 dev tun0
    sudo ip link set tun0 up
 
-3. Run agent:
-   go run main.go -env=config.env -listen
-   # or
-   go run main.go -env=config.env -peer-id=agent-002
+3. Run agent (unified mode - all peers use same command):
+   go run main.go -env=config.env
+   # All peers join the same virtual network automatically
 
 4. Test connectivity:
    ping 10.10.0.6  # from one agent to another's VIP
@@ -243,8 +242,6 @@ func main() {
 		envFile      = flag.String("env", "", "Path to .env file (optional)")
 		agentID      = flag.String("agent-id", "", "Agent ID (overrides env)")
 		signalingURL = flag.String("signaling-url", "", "Signaling server URL (overrides env)")
-		peerID       = flag.String("peer-id", "", "Peer ID to connect to (for offerer mode)")
-		listen       = flag.Bool("listen", false, "Listen for incoming connections (answerer mode)")
 		verbose      = flag.Bool("verbose", false, "Enable verbose logging (overrides env)")
 		_            = flag.String("ping", "", "VIP to ping for testing")
 		help         = flag.Bool("help", false, "Show configuration help")
@@ -305,9 +302,6 @@ func main() {
 	if config.SignalingURL == "" {
 		log.Fatal("signaling-url is required (set SIGNALING_URL env var or use -signaling-url flag)")
 	}
-	if !*listen && *peerID == "" {
-		log.Fatal("peer-id is required for offerer mode, or use -listen for answerer mode")
-	}
 
 	// Create agent
 	agent, err := NewAgent(config)
@@ -331,16 +325,9 @@ func main() {
 		log.Fatalf("Failed to start agent: %v", err)
 	}
 
-	if *listen {
-		// Answerer mode - listen for incoming connections
-		if err := runAnswerer(ctx, agent); err != nil {
-			log.Fatalf("Answerer failed: %v", err)
-		}
-	} else {
-		// Offerer mode - connect to specific peer
-		if err := runOfferer(ctx, agent, *peerID); err != nil {
-			log.Fatalf("Offerer failed: %v", err)
-		}
+	// Run in unified mode - all peers join the same virtual network
+	if err := runUnifiedMode(ctx, agent); err != nil {
+		log.Fatalf("Unified mode failed: %v", err)
 	}
 
 	// Cleanup
@@ -641,11 +628,14 @@ func printConfigHelp() {
 	fmt.Println("  VERBOSE               - Enable verbose logging (default: false)")
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  # Answerer mode")
-	fmt.Println("  sudo go run main.go -env=config.env -listen")
+	fmt.Println("  # Unified mode - all peers join the same virtual network")
+	fmt.Println("  sudo go run main.go -env=config.env")
 	fmt.Println()
-	fmt.Println("  # Offerer mode")
-	fmt.Println("  sudo go run main.go -env=config.env -peer-id=agent-002")
+	fmt.Println("  # No-TUN mode (for testing without TUN interface)")
+	fmt.Println("  go run main.go -env=config.env -no-tun")
+	fmt.Println()
+	fmt.Println("  # With custom agent ID")
+	fmt.Println("  sudo go run main.go -env=config.env -agent-id=my-agent")
 	fmt.Println()
 	fmt.Println("  # Test connectivity")
 	fmt.Println("  sudo go run main.go -env=config.env -ping=10.10.0.6")
@@ -1457,10 +1447,10 @@ func (sc *SignalingClient) Close() error {
 // signalingLoop processes incoming signaling messages
 func (a *Agent) signalingLoop() {
 	for {
-		select {
+			select {
 		case <-a.shutdownCtx.Done():
-			return
-		default:
+				return
+			default:
 			// Process messages with timeout
 			ctx, cancel := context.WithTimeout(a.shutdownCtx, time.Second)
 			message, err := a.signaling.Receive(ctx)
@@ -1497,7 +1487,7 @@ func (a *Agent) handleSignalingMessage(msg SignalingMessage) error {
 			a.logger.Println("Successfully registered with signaling server (status field)")
 			// Parse peers from registered response
 			go a.handleRegisteredWithPeers(msg)
-			return nil
+	return nil
 		}
 	}
 
@@ -1625,7 +1615,7 @@ func (a *Agent) handleRegisteredWithPeers(msg SignalingMessage) error {
 		}
 
 		peerAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", peer.PublicIP, peer.PublicPort))
-		if err != nil {
+	if err != nil {
 			a.logger.Printf("Failed to resolve peer %s:%d: %v", peer.PublicIP, peer.PublicPort, err)
 			continue
 		}
@@ -1819,6 +1809,42 @@ func runOfferer(ctx context.Context, agent *Agent, peerID string) error {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
+}
+
+// runUnifiedMode runs the agent in unified mode where all peers join the same virtual network
+// No distinction between answerer/offerer - all peers are equal
+func runUnifiedMode(ctx context.Context, agent *Agent) error {
+	agent.logger.Println("🌐 Starting unified mode - joining virtual network...")
+	
+	// Wait for agent to be ready and connected to signaling
+	timeout := time.After(30 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timeout:
+			return fmt.Errorf("timeout waiting for agent to be ready")
+		case <-ticker.C:
+			// Check if we have any peer mappings (indicating successful connection)
+			agent.mu.RLock()
+			peerCount := len(agent.peerMappings)
+			agent.mu.RUnlock()
+			
+			if peerCount > 0 {
+				agent.logger.Printf("✅ Connected to virtual network with %d peers", peerCount)
+				break
+			}
+		}
+	}
+	
+	// Start interactive session for all peers
+	agent.logger.Println("🎮 Starting interactive session...")
+	agent.logger.Println("📝 Commands: 'ping <vip>', 'msg <text>', 'broadcast <text>', 'quit'")
+	
+	return runInteractiveSession(ctx, agent)
 }
 
 // runInteractiveSession runs the interactive session
