@@ -209,6 +209,7 @@ type Agent struct {
 	tunInterface   *water.Interface
 	udpConn        *net.UDPConn
 	turnConn       *turn.Client
+	turnAllocation net.PacketConn // TURN allocation for relay
 	publicEndpoint *net.UDPAddr
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
@@ -221,6 +222,8 @@ type Agent struct {
 	fileBytes   int64
 	// transfer intent tracking: VIP -> pending
 	transferPending map[string]bool
+	// TURN fallback tracking: VIP -> isRelayed
+	turnRelayedPeers map[string]bool
 }
 
 // AgentStats holds runtime statistics
@@ -650,14 +653,15 @@ func NewAgent(config *AgentConfig) (*Agent, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	agent := &Agent{
-		config:          config,
-		peerSessions:    make(map[string]*PeerSession),
-		peerMappings:    make(map[string]*net.UDPAddr),
-		shutdownCtx:     ctx,
-		shutdownCancel:  cancel,
-		logger:          log.New(os.Stdout, "[AGENT] ", log.LstdFlags),
-		stats:           &AgentStats{},
-		transferPending: make(map[string]bool),
+		config:           config,
+		peerSessions:     make(map[string]*PeerSession),
+		peerMappings:     make(map[string]*net.UDPAddr),
+		shutdownCtx:      ctx,
+		shutdownCancel:   cancel,
+		logger:           log.New(os.Stdout, "[AGENT] ", log.LstdFlags),
+		stats:            &AgentStats{},
+		transferPending:  make(map[string]bool),
+		turnRelayedPeers: make(map[string]bool),
 	}
 
 	// Create signaling client
@@ -688,6 +692,12 @@ func (a *Agent) Start() error {
 	if err := a.discoverPublicEndpoint(); err != nil {
 		a.logger.Printf("Warning: STUN discovery failed: %v", err)
 		// Continue with local endpoint
+	}
+
+	// Create TURN client for fallback relay
+	if err := a.createTURNClient(); err != nil {
+		a.logger.Printf("Warning: TURN client creation failed: %v", err)
+		// Continue without TURN fallback
 	}
 
 	// Connect to signaling server
@@ -732,9 +742,12 @@ func (a *Agent) Stop() error {
 		a.udpConn.Close()
 	}
 
-	// Close TURN connection
+	// Close TURN connection and allocation
 	if a.turnConn != nil {
 		a.turnConn.Close()
+	}
+	if a.turnAllocation != nil {
+		a.turnAllocation.Close()
 	}
 
 	// Close signaling connection
@@ -837,6 +850,40 @@ func (a *Agent) discoverPublicEndpoint() error {
 
 	a.logger.Printf("STUN: XORMappedAddress %s:%d", xorAddr.IP, xorAddr.Port)
 	a.logger.Printf("Discovered public endpoint: %s", a.publicEndpoint)
+	return nil
+}
+
+// createTURNClient creates TURN client for fallback relay
+func (a *Agent) createTURNClient() error {
+	if a.config.TURNServer == "" {
+		return fmt.Errorf("no TURN server configured")
+	}
+
+	a.logger.Printf("TURN: creating client for server %s", a.config.TURNServer)
+
+	// Create TURN client
+	client, err := turn.NewClient(&turn.ClientConfig{
+		STUNServerAddr: a.config.STUNServer,
+		TURNServerAddr: a.config.TURNServer,
+		Username:       a.config.TURNUser,
+		Password:       a.config.TURNPass,
+		Conn:           a.udpConn,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create TURN client: %w", err)
+	}
+
+	a.turnConn = client
+
+	// Create allocation
+	allocation, err := client.Allocate()
+	if err != nil {
+		return fmt.Errorf("failed to create TURN allocation: %w", err)
+	}
+
+	a.turnAllocation = allocation
+	a.logger.Printf("TURN: allocation created")
+
 	return nil
 }
 
@@ -1043,6 +1090,8 @@ func (a *Agent) handleHelloFrame(frame UDPFrame, addr *net.UDPAddr) {
 
 	if err := a.sendUDPFrame(helloFrame, addr); err != nil {
 		a.logger.Printf("Error sending HELLO response: %v", err)
+	} else {
+		a.logger.Printf("HELLO response sent to %s", addr)
 	}
 }
 
@@ -1090,6 +1139,23 @@ func (a *Agent) handleErrorFrame(frame UDPFrame, addr *net.UDPAddr) {
 
 // sendUDPFrame sends a UDP frame to the specified address
 func (a *Agent) sendUDPFrame(frame UDPFrame, addr *net.UDPAddr) error {
+	// Check if this peer is using TURN relay
+	dstVIP := bytesToIP(frame.DstVIP)
+	a.mu.RLock()
+	isRelayed := a.turnRelayedPeers[dstVIP]
+	a.mu.RUnlock()
+
+	if isRelayed && a.turnAllocation != nil {
+		// Send via TURN relay
+		return a.sendViaTURNRelay(frame, addr)
+	}
+
+	// Send via direct UDP
+	return a.sendViaDirectUDP(frame, addr)
+}
+
+// sendViaDirectUDP sends frame via direct UDP connection
+func (a *Agent) sendViaDirectUDP(frame UDPFrame, addr *net.UDPAddr) error {
 	// Serialize frame
 	data, err := a.serializeUDPFrame(frame)
 	if err != nil {
@@ -1099,6 +1165,29 @@ func (a *Agent) sendUDPFrame(frame UDPFrame, addr *net.UDPAddr) error {
 	// Send via UDP
 	_, err = a.udpConn.WriteToUDP(data, addr)
 	return err
+}
+
+// sendViaTURNRelay sends frame via TURN relay
+func (a *Agent) sendViaTURNRelay(frame UDPFrame, addr *net.UDPAddr) error {
+	if a.turnAllocation == nil {
+		return fmt.Errorf("TURN allocation not available")
+	}
+
+	// Serialize frame
+	data, err := a.serializeUDPFrame(frame)
+	if err != nil {
+		return fmt.Errorf("failed to serialize UDP frame: %w", err)
+	}
+
+	// Send via TURN relay
+	_, err = a.turnAllocation.WriteTo(data, addr)
+	if err != nil {
+		a.logger.Printf("TURN relay send failed: %v", err)
+		return err
+	}
+
+	a.logger.Printf("TURN: relayed %d bytes to %s", len(data), addr)
+	return nil
 }
 
 // serializeUDPFrame serializes a UDP frame to bytes
@@ -1632,6 +1721,9 @@ func (a *Agent) handleRegisteredWithPeers(msg SignalingMessage) error {
 func (a *Agent) startNATPunching(peerAddr *net.UDPAddr, peerVIP string) {
 	a.logger.Printf("Starting NAT punching to %s", peerAddr)
 
+	// Track punching attempts and responses
+	var successfulPunches int
+
 	// Send HELLO + PING packets
 	for i := 0; i < a.config.PunchAttempts; i++ {
 		select {
@@ -1676,12 +1768,101 @@ func (a *Agent) startNATPunching(peerAddr *net.UDPAddr, peerVIP string) {
 					peerAddr.String(), a.getLocalVIP(), peerVIP)
 			}
 
+			// Check for responses (simplified check)
+			a.mu.RLock()
+			_, hasMapping := a.peerMappings[peerVIP]
+			a.mu.RUnlock()
+
+			if hasMapping {
+				successfulPunches++
+			}
+
 			// Wait for interval
 			time.Sleep(time.Duration(a.config.PunchIntervalMs) * time.Millisecond)
 		}
 	}
 
-	a.logger.Printf("NAT punching completed for %s", peerAddr)
+	// Check if punching was successful
+	a.mu.RLock()
+	_, hasMapping := a.peerMappings[peerVIP]
+	a.mu.RUnlock()
+
+	if !hasMapping && a.turnAllocation != nil {
+		// UDP hole punching failed, try TURN fallback
+		a.logger.Printf("[FALLBACK] UDP punching failed for %s, attempting TURN relay", peerAddr)
+		go a.startTURNFallback(peerAddr, peerVIP)
+	} else if hasMapping {
+		a.logger.Printf("[SUCCESS] NAT punching successful for %s", peerAddr)
+	} else {
+		a.logger.Printf("[FAILED] NAT punching failed for %s (no TURN fallback available)", peerAddr)
+	}
+}
+
+// startTURNFallback attempts to establish connection via TURN relay
+func (a *Agent) startTURNFallback(peerAddr *net.UDPAddr, peerVIP string) {
+	if a.turnAllocation == nil {
+		a.logger.Printf("[FALLBACK] TURN allocation not available for %s", peerAddr)
+		return
+	}
+
+	a.logger.Printf("[FALLBACK] Starting TURN relay for %s (VIP: %s)", peerAddr, peerVIP)
+
+	// Mark peer as using TURN relay
+	a.mu.Lock()
+	a.turnRelayedPeers[peerVIP] = true
+	a.mu.Unlock()
+
+	// Send HELLO via TURN relay
+	helloFrame := UDPFrame{
+		Version:     1,
+		MessageType: 1, // HELLO
+		SrcVIP:      ipToBytes(a.getLocalVIP()),
+		DstVIP:      ipToBytes(peerVIP),
+		PayloadLen:  0,
+		Payload:     nil,
+	}
+
+	if err := a.sendViaTURNRelay(helloFrame, peerAddr); err != nil {
+		a.logger.Printf("[FALLBACK] TURN HELLO send failed: %v", err)
+		return
+	}
+
+	// Send periodic PING via TURN relay
+	ticker := time.NewTicker(time.Duration(a.config.KeepaliveIntervalS) * time.Second)
+	defer ticker.Stop()
+
+	for i := 0; i < 10; i++ { // Try for 10 intervals
+		select {
+		case <-a.shutdownCtx.Done():
+			return
+		case <-ticker.C:
+			pingFrame := UDPFrame{
+				Version:     1,
+				MessageType: 2, // PING
+				SrcVIP:      ipToBytes(a.getLocalVIP()),
+				DstVIP:      ipToBytes(peerVIP),
+				PayloadLen:  0,
+				Payload:     nil,
+			}
+
+			if err := a.sendViaTURNRelay(pingFrame, peerAddr); err != nil {
+				a.logger.Printf("[FALLBACK] TURN PING send failed: %v", err)
+				continue
+			}
+
+			// Check if we got a response (peer mapping exists)
+			a.mu.RLock()
+			_, hasMapping := a.peerMappings[peerVIP]
+			a.mu.RUnlock()
+
+			if hasMapping {
+				a.logger.Printf("[FALLBACK] TURN relay successful for %s", peerAddr)
+				return
+			}
+		}
+	}
+
+	a.logger.Printf("[FALLBACK] TURN relay failed for %s", peerAddr)
 }
 
 // peerReaper removes stale peer mappings
@@ -1747,9 +1928,15 @@ func (a *Agent) logStats() {
 
 	a.mu.RLock()
 	peersCount := len(a.peerMappings)
+	turnRelayedCount := 0
+	for _, isRelayed := range a.turnRelayedPeers {
+		if isRelayed {
+			turnRelayedCount++
+		}
+	}
 	a.mu.RUnlock()
 
-	a.logger.Printf("Stats: TX=%d, RX=%d, Peers=%d", txCount, rxCount, peersCount)
+	a.logger.Printf("Stats: TX=%d, RX=%d, Peers=%d, TURN-Relayed=%d", txCount, rxCount, peersCount, turnRelayedCount)
 }
 
 // ============================================================================
