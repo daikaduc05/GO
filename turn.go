@@ -17,7 +17,9 @@ import (
 type TURNAllocation interface {
 	net.PacketConn
 	// CreatePermissions creates TURN permissions for the given addresses
-	// This matches the actual method signature from pion/turn/v2
+	// Per RFC 5766 Section 9: XOR-PEER-ADDRESS contains IP address (port portion is ignored)
+	// The actual signature from pion/turn/v2 is: CreatePermissions(addrs ...net.Addr) error
+	// We pass net.UDPAddr with the IP, and port is ignored by the server
 	CreatePermissions(addrs ...net.Addr) error
 }
 
