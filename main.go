@@ -138,7 +138,12 @@ func main() {
 
 	tunIface := NewTUNInterface(tunConfig)
 	if err := tunIface.Create(); err != nil {
-		log.Printf("⚠️  Failed to create TUN interface: %v (continuing without TUN)", err)
+		log.Printf("⚠️  Failed to create TUN interface: %v", err)
+		log.Println("💡 TIP: To create TUN interface, run the program with sudo:")
+		log.Println("   sudo go run . -env=config.env")
+		log.Println("   Or build first: go build . && sudo ./webrtc-agent -env=config.env")
+		log.Println("   Continuing without TUN interface...")
+		tunIface = nil
 	} else {
 		defer tunIface.Close()
 		
@@ -230,6 +235,10 @@ func main() {
 				// Parse packet to get destination IP
 				destIP, err := ParseIPPacket(packet)
 				if err != nil {
+					// Silently skip IPv6 packets
+					if err == ErrIPv6NotSupported {
+						continue
+					}
 					log.Printf("⚠️  Failed to parse IP packet: %v", err)
 					continue
 				}

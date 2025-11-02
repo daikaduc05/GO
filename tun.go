@@ -36,11 +36,21 @@ func NewTUNInterface(config *TUNConfig) *TUNInterface {
 	}
 }
 
+// checkRootPrivileges checks if the process has root privileges
+func checkRootPrivileges() bool {
+	return os.Geteuid() == 0
+}
+
 // Create creates and configures TUN interface
 func (t *TUNInterface) Create() error {
 	// Only support Linux for now
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("TUN interface currently only supported on Linux")
+	}
+
+	// Check for root privileges
+	if !checkRootPrivileges() {
+		return fmt.Errorf("TUN interface creation requires root privileges. Please run with 'sudo' or set CAP_NET_ADMIN capability")
 	}
 
 	// Create TUN interface
@@ -53,7 +63,7 @@ func (t *TUNInterface) Create() error {
 
 	iface, err := water.New(waterConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create TUN interface: %w", err)
+		return fmt.Errorf("failed to create TUN interface: %w (you may need root privileges: run with 'sudo')", err)
 	}
 
 	t.iface = iface

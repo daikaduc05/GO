@@ -113,6 +113,8 @@ func (pm *P2PManager) tryHolePunching(peerID string, peerInfo PeerInfo) (*P2PCon
 		pm.localConn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		buffer := make([]byte, 1024)
 		_, addr, err := pm.localConn.ReadFrom(buffer)
+		// Clear the deadline after read attempt
+		pm.localConn.SetReadDeadline(time.Time{})
 		if err == nil && addr.String() == peerAddr.String() {
 			success = true
 			pm.logger.Printf("Hole punching successful: received response from %s", addr)
@@ -215,10 +217,19 @@ func (pm *P2PManager) StartPacketReceiver(onPacket func(peerID string, packet []
 			return
 		}
 
+		// Clear any leftover read deadlines from hole punching attempts
+		pm.localConn.SetReadDeadline(time.Time{})
+
 		buffer := make([]byte, 1500)
 		for {
 			n, addr, err := pm.localConn.ReadFrom(buffer)
 			if err != nil {
+				// Check if it's a timeout error - these are expected and should be ignored
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					// Timeout is expected when waiting for packets, silently continue
+					continue
+				}
+				// Log other errors
 				pm.logger.Printf("UDP read error: %v", err)
 				continue
 			}
@@ -257,6 +268,12 @@ func (pm *P2PManager) StartPacketReceiver(onPacket func(peerID string, packet []
 		for {
 			n, addr, err := allocation.ReadFrom(buffer)
 			if err != nil {
+				// Check if it's a timeout error - these are expected and should be ignored
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					// Timeout is expected when waiting for packets, silently continue
+					continue
+				}
+				// Log other errors
 				pm.logger.Printf("Relay read error: %v", err)
 				continue
 			}
