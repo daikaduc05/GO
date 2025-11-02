@@ -301,7 +301,16 @@ func (sc *SignalingClient) SendRegister(msg RegisterMessage) error {
 		return fmt.Errorf("failed to write register message: %w", err)
 	}
 
-	sc.logger.Printf("Sent register message: agent_id=%s, public_ip=%s:%d", msg.AgentID, msg.PublicIP, msg.PublicPort)
+	// Log full register message details including relay info
+	sc.logger.Printf("📤 Sent register message via WebSocket:")
+	sc.logger.Printf("   Agent ID: %s", msg.AgentID)
+	sc.logger.Printf("   Public IP: %s:%d", msg.PublicIP, msg.PublicPort)
+	if msg.RelayIP != "" && msg.RelayPort != 0 {
+		sc.logger.Printf("   Relay IP: %s:%d ✅", msg.RelayIP, msg.RelayPort)
+	} else {
+		sc.logger.Printf("   Relay IP: (empty)")
+	}
+	sc.logger.Printf("   JSON payload: %s", string(data))
 	return nil
 }
 

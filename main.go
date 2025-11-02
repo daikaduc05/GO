@@ -93,6 +93,15 @@ func main() {
 
 	// Step 6.3: Send Register Message (first mandatory message)
 	log.Println("📍 Step 6.3: Registering with signaling server...")
+	log.Printf("📤 Register message details:")
+	log.Printf("   Public IP: %s:%d", publicIP, publicPort)
+	if relayIP != "" && relayPort != 0 {
+		log.Printf("   Relay IP: %s:%d", relayIP, relayPort)
+	} else {
+		log.Printf("   Relay IP: (empty - no relay allocated)")
+	}
+	log.Printf("   Agent ID: %s", *agentID)
+	
 	registerMsg := RegisterMessage{
 		Type:       "register",
 		AgentID:    *agentID,
@@ -104,6 +113,7 @@ func main() {
 	if err := signaling.SendRegister(registerMsg); err != nil {
 		log.Fatalf("Failed to register: %v", err)
 	}
+	log.Printf("✅ Register message sent successfully")
 
 	// Step 6.5: Receive RegisterAgentResponse
 	log.Println("📍 Step 6.5: Waiting for register response...")
