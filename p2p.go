@@ -15,7 +15,8 @@ type P2PConnection struct {
 	Method     ConnectionMethod
 	Status     ConnectionStatus
 	Conn       net.PacketConn  // UDP connection for hole punching
-	RelayConn  net.PacketConn  // TURN allocation for relay
+	RelayConn  net.PacketConn  // TURN allocation for relay (as PacketConn for ReadFrom)
+	RelayAlloc TURNAllocation  // TURN allocation object (for CreatePermission/SendTo)
 	PeerAddr   *net.UDPAddr    // Destination address
 	RelayAddr  *net.UDPAddr    // Relay destination address
 	PublicIP   string
@@ -149,6 +150,11 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 		return nil, fmt.Errorf("TURN allocation not available")
 	}
 
+	allocationObj := pm.turnClient.GetAllocationObj()
+	if allocationObj == nil {
+		return nil, fmt.Errorf("TURN allocation object not available")
+	}
+
 	if peerInfo.RelayIP == "" || peerInfo.RelayPort == 0 {
 		return nil, fmt.Errorf("peer has no relay IP/port")
 	}
@@ -164,11 +170,19 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 		peerAddr, _ = net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", peerInfo.PublicIP, peerInfo.PublicPort))
 	}
 
+	// Create permission for peer's relay IP (required for Send Indication)
+	pm.logger.Printf("🔐 [TURN] Creating permission for peer relay IP: %s", relayAddr.IP.String())
+	if err := allocationObj.CreatePermission(relayAddr.IP); err != nil {
+		return nil, fmt.Errorf("failed to create TURN permission: %w", err)
+	}
+	pm.logger.Printf("✅ [TURN] Permission created for %s", relayAddr.IP.String())
+
 	conn := &P2PConnection{
 		PeerID:     peerID,
 		Method:     MethodRelay,
 		Status:     StatusConnected,
 		RelayConn:  allocation,
+		RelayAlloc: allocationObj,
 		RelayAddr:  relayAddr,
 		PeerAddr:   peerAddr, // Store public address for matching received packets
 		PublicIP:   peerInfo.PublicIP,
@@ -178,17 +192,16 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 		LastUsed:   time.Now(),
 	}
 
-	// Send test packet via relay
-	// Note: WriteTo on PacketConn is usually non-blocking, but timeout can occur
-	// if there's network routing issue or firewall blocking
+	// Send test packet via relay using Send Indication
 	testPacket := []byte(fmt.Sprintf("RELAY-PING-%d", time.Now().Unix()))
 	localAddr := allocation.LocalAddr()
-	pm.logger.Printf("📤 [TURN->Relay] Sending test packet:")
+	pm.logger.Printf("📤 [TURN->Relay] Sending test packet via Send Indication:")
 	pm.logger.Printf("   From: %s (TURN allocation)", localAddr)
 	pm.logger.Printf("   To: %s:%d (peer relay address)", relayAddr.IP, relayAddr.Port)
 	pm.logger.Printf("   Packet size: %d bytes", len(testPacket))
 	pm.logger.Printf("   Packet content: %s", string(testPacket))
-	_, err = allocation.WriteTo(testPacket, relayAddr)
+	
+	_, err = allocationObj.SendTo(testPacket, relayAddr)
 	if err != nil {
 		// Check if it's timeout - might be network/firewall issue
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -196,10 +209,10 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 			// Continue anyway - connection might still work for receiving
 			// The timeout could be false positive if TURN server is just slow
 		} else {
-			return nil, fmt.Errorf("failed to send relay packet: %w", err)
+			return nil, fmt.Errorf("failed to send relay packet via Send Indication: %w", err)
 		}
 	} else {
-		pm.logger.Printf("✅ Relay test packet sent successfully")
+		pm.logger.Printf("✅ Relay test packet sent successfully via Send Indication")
 	}
 
 	return conn, nil
@@ -229,9 +242,19 @@ func (pm *P2PManager) SendPacket(peerID string, packet []byte) error {
 	if conn.Method == MethodHole {
 		_, err = conn.Conn.WriteTo(packet, conn.PeerAddr)
 	} else {
+		// Ensure permission exists for peer's relay IP (permissions expire after 5 minutes)
+		if conn.RelayAlloc != nil {
+			// Check if permission needs refresh - for now, always refresh to be safe
+			// In production, you might want to cache permission creation time
+			if err := conn.RelayAlloc.CreatePermission(conn.RelayAddr.IP); err != nil {
+				pm.logger.Printf("⚠️  Failed to refresh/create permission for %s: %v", conn.RelayAddr.IP, err)
+				// Continue anyway - permission might still be valid
+			}
+		}
+
 		// Log TURN relay packet send details
 		localAddr := conn.RelayConn.LocalAddr()
-		pm.logger.Printf("📤 [TURN->Relay] Sending packet to peer %s:", peerID)
+		pm.logger.Printf("📤 [TURN->Relay] Sending packet to peer %s via Send Indication:", peerID)
 		pm.logger.Printf("   From: %s (TURN allocation)", localAddr)
 		pm.logger.Printf("   To: %s:%d (peer relay address)", conn.RelayAddr.IP, conn.RelayAddr.Port)
 		pm.logger.Printf("   Packet size: %d bytes", len(packet))
@@ -244,9 +267,16 @@ func (pm *P2PManager) SendPacket(peerID string, packet []byte) error {
 		if len(packet) <= 100 {
 			pm.logger.Printf("   Packet content (as string): %s", string(packet))
 		}
-		_, err = conn.RelayConn.WriteTo(packet, conn.RelayAddr)
+		
+		// Use SendTo instead of WriteTo for proper TURN Send Indication
+		if conn.RelayAlloc != nil {
+			_, err = conn.RelayAlloc.SendTo(packet, conn.RelayAddr)
+		} else {
+			// Fallback to WriteTo if allocation object not available
+			_, err = conn.RelayConn.WriteTo(packet, conn.RelayAddr)
+		}
 		if err == nil {
-			pm.logger.Printf("   ✅ Packet sent successfully")
+			pm.logger.Printf("   ✅ Packet sent successfully via Send Indication")
 		}
 	}
 
@@ -366,10 +396,37 @@ func (pm *P2PManager) StartPacketReceiver(onPacket func(peerID string, packet []
 			pm.mu.RUnlock()
 
 			if peerID != "" {
-				pm.logger.Printf("📥 Received packet via relay from %s (%s)", peerID, addr)
+				localAddr := allocation.LocalAddr()
+				pm.logger.Printf("📥 [TURN<-Relay] Received packet from peer %s:", peerID)
+				pm.logger.Printf("   Received at: %s (TURN allocation)", localAddr)
+				pm.logger.Printf("   From address: %s (as returned by relay)", addr)
+				pm.logger.Printf("   Packet size: %d bytes", n)
+				// Show packet preview (first 100 bytes or less)
+				previewLen := n
+				if previewLen > 100 {
+					previewLen = 100
+				}
+				pm.logger.Printf("   Packet preview (first %d bytes): %x", previewLen, buffer[:previewLen])
+				if n <= 100 {
+					pm.logger.Printf("   Packet content (as string): %s", string(buffer[:n]))
+				}
 				onPacket(peerID, buffer[:n])
 			} else {
-				pm.logger.Printf("⚠️  Received packet from unknown relay address: %s (trying to match...)", addr)
+				localAddr := allocation.LocalAddr()
+				pm.logger.Printf("⚠️  [TURN<-Relay] Received packet from unknown relay address:")
+				pm.logger.Printf("   Received at: %s (TURN allocation)", localAddr)
+				pm.logger.Printf("   From address: %s (as returned by relay)", addr)
+				pm.logger.Printf("   Packet size: %d bytes", n)
+				// Show packet preview
+				previewLen := n
+				if previewLen > 100 {
+					previewLen = 100
+				}
+				pm.logger.Printf("   Packet preview (first %d bytes): %x", previewLen, buffer[:previewLen])
+				if n <= 100 {
+					pm.logger.Printf("   Packet content (as string): %s", string(buffer[:n]))
+				}
+				pm.logger.Printf("   (trying to match...)")
 				// Try to find any relay connection and use it (fallback)
 				// This handles cases where TURN returns a different address format
 				pm.mu.RLock()
@@ -384,7 +441,20 @@ func (pm *P2PManager) StartPacketReceiver(onPacket func(peerID string, packet []
 				// If we only have one relay connection, assume it's from that peer
 				if len(relayConnections) == 1 {
 					peerID = relayConnections[0]
-					pm.logger.Printf("📥 Assumed packet from %s (only relay connection)", peerID)
+					localAddr := allocation.LocalAddr()
+					pm.logger.Printf("📥 [TURN<-Relay] Assumed packet from %s (only relay connection):", peerID)
+					pm.logger.Printf("   Received at: %s (TURN allocation)", localAddr)
+					pm.logger.Printf("   From address: %s (as returned by relay)", addr)
+					pm.logger.Printf("   Packet size: %d bytes", n)
+					// Show packet preview
+					previewLen := n
+					if previewLen > 100 {
+						previewLen = 100
+					}
+					pm.logger.Printf("   Packet preview (first %d bytes): %x", previewLen, buffer[:previewLen])
+					if n <= 100 {
+						pm.logger.Printf("   Packet content (as string): %s", string(buffer[:n]))
+					}
 					onPacket(peerID, buffer[:n])
 				}
 			}
