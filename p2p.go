@@ -16,7 +16,7 @@ type P2PConnection struct {
 	Status     ConnectionStatus
 	Conn       net.PacketConn  // UDP connection for hole punching
 	RelayConn  net.PacketConn  // TURN allocation for relay (as PacketConn for ReadFrom)
-	RelayAlloc TURNAllocation  // TURN allocation object (for CreatePermission/SendTo)
+	RelayAlloc TURNAllocation  // TURN allocation object (for CreatePermissions/WriteTo)
 	PeerAddr   *net.UDPAddr    // Destination address
 	RelayAddr  *net.UDPAddr    // Relay destination address
 	PublicIP   string
@@ -183,14 +183,15 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 	}
 
 	// Create permission for peer's relay IP (required for Send Indication)
-	pm.logger.Printf("🔐 [TURN] Creating permission for peer relay IP: %s", relayAddr.IP.String())
-	pm.logger.Printf("   Calling allocationObj.CreatePermission(%s)...", relayAddr.IP.String())
+	// CreatePermissions takes net.Addr, not net.IP
+	pm.logger.Printf("🔐 [TURN] Creating permission for peer relay IP: %s", relayAddr.String())
+	pm.logger.Printf("   Calling allocationObj.CreatePermissions(%s)...", relayAddr.String())
 	
-	if err := allocationObj.CreatePermission(relayAddr.IP); err != nil {
+	if err := allocationObj.CreatePermissions(relayAddr); err != nil {
 		pm.logger.Printf("❌ [TURN] Failed to create permission: %v", err)
 		return nil, fmt.Errorf("failed to create TURN permission: %w", err)
 	}
-	pm.logger.Printf("✅ [TURN] Permission created successfully for %s", relayAddr.IP.String())
+	pm.logger.Printf("✅ [TURN] Permission created successfully for %s", relayAddr.String())
 
 	conn := &P2PConnection{
 		PeerID:     peerID,
@@ -216,7 +217,8 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 	pm.logger.Printf("   Packet size: %d bytes", len(testPacket))
 	pm.logger.Printf("   Packet content: %s", string(testPacket))
 	
-	_, err = allocationObj.SendTo(testPacket, relayAddr)
+	// Use WriteTo instead of SendTo - WriteTo is the standard net.PacketConn method
+	_, err = allocationObj.WriteTo(testPacket, relayAddr)
 	if err != nil {
 		// Check if it's timeout - might be network/firewall issue
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -261,8 +263,9 @@ func (pm *P2PManager) SendPacket(peerID string, packet []byte) error {
 		if conn.RelayAlloc != nil {
 			// Check if permission needs refresh - for now, always refresh to be safe
 			// In production, you might want to cache permission creation time
-			if err := conn.RelayAlloc.CreatePermission(conn.RelayAddr.IP); err != nil {
-				pm.logger.Printf("⚠️  Failed to refresh/create permission for %s: %v", conn.RelayAddr.IP, err)
+			// CreatePermissions takes net.Addr, not net.IP
+			if err := conn.RelayAlloc.CreatePermissions(conn.RelayAddr); err != nil {
+				pm.logger.Printf("⚠️  Failed to refresh/create permission for %s: %v", conn.RelayAddr.String(), err)
 				// Continue anyway - permission might still be valid
 			}
 		}
@@ -283,9 +286,10 @@ func (pm *P2PManager) SendPacket(peerID string, packet []byte) error {
 			pm.logger.Printf("   Packet content (as string): %s", string(packet))
 		}
 		
-		// Use SendTo instead of WriteTo for proper TURN Send Indication
+		// Use WriteTo for TURN relay - WriteTo handles Send Indication internally
+		// The allocation's WriteTo method sends data via TURN Send Indication
 		if conn.RelayAlloc != nil {
-			_, err = conn.RelayAlloc.SendTo(packet, conn.RelayAddr)
+			_, err = conn.RelayAlloc.WriteTo(packet, conn.RelayAddr)
 		} else {
 			// Fallback to WriteTo if allocation object not available
 			_, err = conn.RelayConn.WriteTo(packet, conn.RelayAddr)

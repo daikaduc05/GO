@@ -12,11 +12,13 @@ import (
 	"github.com/pion/turn/v2"
 )
 
-// TURNAllocation interface for TURN allocation with CreatePermission/SendTo methods
+// TURNAllocation interface for TURN allocation with CreatePermissions/WriteTo methods
+// Matches the actual methods from pion/turn/v2 internal/client.UDPConn
 type TURNAllocation interface {
 	net.PacketConn
-	CreatePermission(peerIP net.IP) error
-	SendTo(data []byte, peer net.Addr) (int, error)
+	// CreatePermissions creates TURN permissions for the given addresses
+	// This matches the actual method signature from pion/turn/v2
+	CreatePermissions(addrs ...net.Addr) error
 }
 
 // TURNClient handles TURN relay connection
@@ -24,7 +26,7 @@ type TURNClient struct {
 	config     *Config
 	client     *turn.Client
 	allocation net.PacketConn // For backward compatibility (used as PacketConn)
-	allocationObj TURNAllocation // Store actual allocation object for CreatePermission/SendTo
+	allocationObj TURNAllocation // Store actual allocation object for CreatePermissions/WriteTo
 	logger     *log.Logger
 }
 
@@ -134,10 +136,14 @@ func (tc *TURNClient) Connect(udpConn *net.UDPConn) error {
 		}
 		
 		// After Allocate succeeds, save allocation to struct TURNClient
-		// Type assert to get access to CreatePermission/SendTo methods
+		// The allocation from client.Allocate() returns net.PacketConn
+		// The actual type is *client.UDPConn which has CreatePermissions method
+		// Type assert to TURNAllocation interface to get access to CreatePermissions
 		allocObj, ok := result.conn.(TURNAllocation)
 		if !ok {
-			return fmt.Errorf("TURN allocation does not implement TURNAllocation interface")
+			// If type assertion fails, allocation doesn't have CreatePermissions method
+			// This shouldn't happen with pion/turn/v2, but handle it gracefully
+			return fmt.Errorf("TURN allocation does not implement TURNAllocation interface (missing CreatePermissions method)")
 		}
 		
 		// Assign allocation to struct fields
@@ -166,7 +172,7 @@ func (tc *TURNClient) GetAllocation() net.PacketConn {
 	return tc.allocation
 }
 
-// GetAllocationObj returns the TURN allocation object with CreatePermission/SendTo methods
+// GetAllocationObj returns the TURN allocation object with CreatePermissions/WriteTo methods
 func (tc *TURNClient) GetAllocationObj() TURNAllocation {
 	return tc.allocationObj
 }
