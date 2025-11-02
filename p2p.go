@@ -151,12 +151,21 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 		return nil, fmt.Errorf("failed to resolve relay address: %w", err)
 	}
 
+	// Also resolve public address for matching packets received via relay
+	var peerAddr *net.UDPAddr
+	if peerInfo.PublicIP != "" && peerInfo.PublicPort != 0 {
+		peerAddr, _ = net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", peerInfo.PublicIP, peerInfo.PublicPort))
+	}
+
 	conn := &P2PConnection{
 		PeerID:     peerID,
 		Method:     MethodRelay,
 		Status:     StatusConnected,
 		RelayConn:  allocation,
 		RelayAddr:  relayAddr,
+		PeerAddr:   peerAddr, // Store public address for matching received packets
+		PublicIP:   peerInfo.PublicIP,
+		PublicPort: peerInfo.PublicPort,
 		RelayIP:    peerInfo.RelayIP,
 		RelayPort:  peerInfo.RelayPort,
 		LastUsed:   time.Now(),
@@ -278,21 +287,60 @@ func (pm *P2PManager) StartPacketReceiver(onPacket func(peerID string, packet []
 				continue
 			}
 
-			// Find connection by relay address
+			// Find connection by relay address or public address
+			// TURN relay may return either relay address or peer's public address
 			pm.mu.RLock()
 			var peerID string
 			for pid, conn := range pm.connections {
-				if conn.Method == MethodRelay && conn.RelayAddr != nil && conn.RelayAddr.String() == addr.String() {
-					peerID = pid
-					break
+				if conn.Method == MethodRelay {
+					// Try matching with relay address
+					if conn.RelayAddr != nil && conn.RelayAddr.String() == addr.String() {
+						peerID = pid
+						break
+					}
+					// Also try matching with public address (TURN may return peer's public addr)
+					if conn.PeerAddr != nil && conn.PeerAddr.String() == addr.String() {
+						peerID = pid
+						break
+					}
+					// Try matching IP only (in case port is different)
+					if conn.RelayAddr != nil {
+						relayIP := conn.RelayAddr.IP.String()
+						if udpAddr, ok := addr.(*net.UDPAddr); ok {
+							addrIP := udpAddr.IP.String()
+							if relayIP == addrIP {
+								peerID = pid
+								pm.logger.Printf("Matched relay connection by IP: %s -> %s (port may differ)", relayIP, addrIP)
+								break
+							}
+						}
+					}
 				}
 			}
 			pm.mu.RUnlock()
 
 			if peerID != "" {
+				pm.logger.Printf("📥 Received packet via relay from %s (%s)", peerID, addr)
 				onPacket(peerID, buffer[:n])
 			} else {
-				pm.logger.Printf("Received packet from unknown relay address: %s", addr)
+				pm.logger.Printf("⚠️  Received packet from unknown relay address: %s (trying to match...)", addr)
+				// Try to find any relay connection and use it (fallback)
+				// This handles cases where TURN returns a different address format
+				pm.mu.RLock()
+				relayConnections := make([]string, 0)
+				for pid, conn := range pm.connections {
+					if conn.Method == MethodRelay && conn.Status == StatusConnected {
+						relayConnections = append(relayConnections, pid)
+					}
+				}
+				pm.mu.RUnlock()
+				
+				// If we only have one relay connection, assume it's from that peer
+				if len(relayConnections) == 1 {
+					peerID = relayConnections[0]
+					pm.logger.Printf("📥 Assumed packet from %s (only relay connection)", peerID)
+					onPacket(peerID, buffer[:n])
+				}
 			}
 		}
 	}()

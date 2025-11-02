@@ -25,8 +25,9 @@ func ParseIPPacket(packet []byte) (string, error) {
 		return "", fmt.Errorf("unsupported IP version: %d", version)
 	}
 
-	// Extract destination IP (bytes 12-15 in IPv4 header)
-	destIP := net.IPv4(packet[12], packet[13], packet[14], packet[15])
+	// Extract destination IP (bytes 16-19 in IPv4 header)
+	// Bytes 12-15 are SOURCE IP, bytes 16-19 are DESTINATION IP
+	destIP := net.IPv4(packet[16], packet[17], packet[18], packet[19])
 	return destIP.String(), nil
 }
 
