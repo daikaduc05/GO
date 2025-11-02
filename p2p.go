@@ -153,13 +153,15 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 		pm.logger.Printf("❌ [tryRelay] TURN allocation is nil")
 		return nil, fmt.Errorf("TURN allocation not available")
 	}
-	pm.logger.Printf("✅ [tryRelay] TURN allocation found: %s", allocation.LocalAddr())
 
 	allocationObj := pm.turnClient.GetAllocationObj()
 	if allocationObj == nil {
 		pm.logger.Printf("❌ [tryRelay] TURN allocation object is nil")
 		return nil, fmt.Errorf("TURN allocation object not available")
 	}
+	
+	// Only log success if both allocation and allocationObj are available
+	pm.logger.Printf("✅ [tryRelay] TURN allocation found: %s", allocation.LocalAddr())
 	pm.logger.Printf("✅ [tryRelay] TURN allocation object found")
 
 	if peerInfo.RelayIP == "" || peerInfo.RelayPort == 0 {

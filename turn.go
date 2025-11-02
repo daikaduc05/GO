@@ -133,20 +133,30 @@ func (tc *TURNClient) Connect(udpConn *net.UDPConn) error {
 			return fmt.Errorf("TURN allocation returned nil connection")
 		}
 		
-		tc.allocation = result.conn
-		// Store allocation object for CreatePermission/SendTo methods
-		if result.conn != nil {
-			// Type assert to get access to CreatePermission/SendTo methods
-			// The allocation returned from client.Allocate() implements these methods
-			allocObj, ok := result.conn.(TURNAllocation)
-			if !ok {
-				return fmt.Errorf("TURN allocation does not implement TURNAllocation interface")
-			}
-			tc.allocationObj = allocObj
+		// After Allocate succeeds, save allocation to struct TURNClient
+		// Type assert to get access to CreatePermission/SendTo methods
+		allocObj, ok := result.conn.(TURNAllocation)
+		if !ok {
+			return fmt.Errorf("TURN allocation does not implement TURNAllocation interface")
 		}
+		
+		// Assign allocation to struct fields
+		tc.allocation = result.conn
+		tc.allocationObj = allocObj
+		
+		// Verify allocation was saved successfully
+		if tc.allocation == nil {
+			return fmt.Errorf("TURN allocation is nil after assignment to struct")
+		}
+		if tc.allocationObj == nil {
+			return fmt.Errorf("TURN allocation object is nil after assignment to struct")
+		}
+		
 		relayAddr := result.conn.LocalAddr()
 		tc.logger.Printf("✅ TURN allocation created successfully")
 		tc.logger.Printf("   Relay address: %s", relayAddr)
+		tc.logger.Printf("   Allocation saved to struct: allocation=%v, allocationObj=%v", 
+			tc.allocation != nil, tc.allocationObj != nil)
 		return nil
 	}
 }
