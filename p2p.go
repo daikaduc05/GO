@@ -186,20 +186,28 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 	// Per RFC 5766 Section 9: CreatePermission request MUST include XOR-PEER-ADDRESS attribute
 	// The IP address portion contains the IP address for which permission should be installed
 	// The port portion of XOR-PEER-ADDRESS will be ignored and can be any arbitrary value
-	// CreatePermissions() accepts ...net.Addr, so we pass net.UDPAddr with IP (port is ignored)
 	relayIP := relayAddr.IP
 	relayIPAddr := &net.UDPAddr{
 		IP:   relayIP,
-		Port: 0, // Port is ignored by TURN server per RFC 5766 Section 9
+		Port: 56710, // Port can be any value, using example port for consistency
 	}
-	pm.logger.Printf("🔐 [TURN] Creating permission for peer relay IP: %s (port not required for permission)", relayIP.String())
-	pm.logger.Printf("   Calling allocationObj.CreatePermissions(%s)...", relayIPAddr.String())
+	pm.logger.Printf("🔐 [TURN] Creating permission for %s...", relayIPAddr.IP)
 	
-	if err := allocationObj.CreatePermissions(relayIPAddr); err != nil {
-		pm.logger.Printf("❌ [TURN] Failed to create permission: %v", err)
-		return nil, fmt.Errorf("failed to create TURN permission: %w", err)
+	// Type assert to access CreatePermissions method
+	type allocationWithPermissions interface {
+		net.PacketConn
+		CreatePermissions(addrs ...net.Addr) error
 	}
-	pm.logger.Printf("✅ [TURN] Permission created successfully for IP %s", relayIP.String())
+	if alloc, ok := allocation.(allocationWithPermissions); ok {
+		if err := alloc.CreatePermissions(relayIPAddr); err != nil {
+			pm.logger.Printf("❌ [TURN] CreatePermission failed: %v", err)
+			return nil, fmt.Errorf("failed to create TURN permission: %w", err)
+		}
+		pm.logger.Printf("✅ [TURN] Permission created for %s", relayIPAddr.IP)
+	} else {
+		pm.logger.Printf("❌ [TURN] Failed to type assert allocation to access CreatePermissions")
+		return nil, fmt.Errorf("allocation does not implement CreatePermissions method")
+	}
 
 	conn := &P2PConnection{
 		PeerID:     peerID,
@@ -268,18 +276,28 @@ func (pm *P2PManager) SendPacket(peerID string, packet []byte) error {
 		_, err = conn.Conn.WriteTo(packet, conn.PeerAddr)
 	} else {
 		// Ensure permission exists for peer's relay IP (permissions expire after 5 minutes)
-		if conn.RelayAlloc != nil {
-			// Check if permission needs refresh - for now, always refresh to be safe
-			// In production, you might want to cache permission creation time
-			// Per RFC 5766 Section 9: CreatePermission only needs IP address, port is ignored
+		// Check if permission needs refresh - for now, always refresh to be safe
+		// In production, you might want to cache permission creation time
+		if conn.RelayConn != nil {
 			relayIP := conn.RelayAddr.IP
 			relayIPAddr := &net.UDPAddr{
 				IP:   relayIP,
-				Port: 0, // Port is ignored by TURN server per RFC 5766 Section 9
+				Port: 56710, // Port can be any value, using example port for consistency
 			}
-			if err := conn.RelayAlloc.CreatePermissions(relayIPAddr); err != nil {
-				pm.logger.Printf("⚠️  Failed to refresh/create permission for IP %s: %v", relayIP.String(), err)
-				// Continue anyway - permission might still be valid
+			
+			// Type assert to access CreatePermissions method
+			type allocationWithPermissions interface {
+				net.PacketConn
+				CreatePermissions(addrs ...net.Addr) error
+			}
+			if alloc, ok := conn.RelayConn.(allocationWithPermissions); ok {
+				if err := alloc.CreatePermissions(relayIPAddr); err != nil {
+					pm.logger.Printf("⚠️  Failed to refresh/create permission for IP %s: %v", relayIP.String(), err)
+					// Continue anyway - permission might still be valid
+				}
+			} else {
+				pm.logger.Printf("⚠️  Failed to type assert allocation to access CreatePermissions")
+				// Continue anyway - might still work if permission is already valid
 			}
 		}
 
