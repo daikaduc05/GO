@@ -38,12 +38,45 @@ type P2PManager struct {
 
 // NewP2PManager creates a new P2P connection manager
 func NewP2PManager(localConn net.PacketConn, turnClient *TURNClient) *P2PManager {
-	return &P2PManager{
+	pm := &P2PManager{
 		connections: make(map[string]*P2PConnection),
 		localConn:   localConn,
 		turnClient:  turnClient,
 		logger:      log.New(os.Stdout, "[P2P] ", log.LstdFlags),
 	}
+	
+	// Start TURN keepalive if TURN client is available and has valid allocation
+	if turnClient != nil && turnClient.IsAllocationValid() {
+		turnClient.StartKeepalive()
+		pm.logger.Printf("✅ P2P Manager initialized with TURN keepalive")
+	}
+	
+	return pm
+}
+
+// Close closes the P2P manager and stops TURN keepalive
+func (pm *P2PManager) Close() {
+	pm.logger.Printf("🔌 Closing P2P Manager...")
+	
+	if pm.turnClient != nil {
+		pm.turnClient.StopKeepalive()
+	}
+	
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	
+	for peerID, conn := range pm.connections {
+		if conn.RelayConn != nil {
+			conn.RelayConn.Close()
+		}
+		if conn.Conn != nil && conn.Method == MethodHole {
+			// Don't close localConn here - it's managed elsewhere
+		}
+		pm.logger.Printf("   Closed connection to %s", peerID)
+	}
+	
+	pm.connections = make(map[string]*P2PConnection)
+	pm.logger.Printf("✅ P2P Manager closed")
 }
 
 // Connect establishes P2P connection to a peer
@@ -145,6 +178,14 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 		return nil, fmt.Errorf("TURN client not available")
 	}
 
+	// Ensure allocation is valid, refresh if needed
+	if !pm.turnClient.IsAllocationValid() {
+		pm.logger.Printf("⚠️  TURN allocation invalid, attempting refresh...")
+		if err := pm.turnClient.RefreshAllocation(); err != nil {
+			return nil, fmt.Errorf("failed to refresh TURN allocation: %w", err)
+		}
+	}
+
 	allocation := pm.turnClient.GetAllocation()
 	if allocation == nil {
 		return nil, fmt.Errorf("TURN allocation not available")
@@ -155,13 +196,20 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 		return nil, fmt.Errorf("TURN allocation object not available")
 	}
 
-	if peerInfo.RelayIP == "" || peerInfo.RelayPort == 0 {
-		return nil, fmt.Errorf("peer has no relay IP/port")
-	}
-
-	relayAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", peerInfo.RelayIP, peerInfo.RelayPort))
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve relay address: %w", err)
+	// Use peer's relay address from peerInfo, but prefer allocation's local address if available
+	// If peerInfo doesn't have relay info, we can't establish relay connection
+	var relayAddr *net.UDPAddr
+	var err error
+	
+	if peerInfo.RelayIP != "" && peerInfo.RelayPort != 0 {
+		// Use peer's relay address from signaling
+		relayAddr, err = net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", peerInfo.RelayIP, peerInfo.RelayPort))
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve peer relay address: %w", err)
+		}
+		pm.logger.Printf("📋 Using peer relay address from signaling: %s:%d", peerInfo.RelayIP, peerInfo.RelayPort)
+	} else {
+		return nil, fmt.Errorf("peer has no relay IP/port in signaling info")
 	}
 
 	// Also resolve public address for matching packets received via relay

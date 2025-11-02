@@ -70,18 +70,20 @@ func main() {
 	var relayPort int
 	if err := turnClient.Connect(udpConn); err != nil {
 		log.Printf("⚠️  TURN allocation failed: %v (continuing without relay)", err)
+		log.Printf("   Relay fallback will not be available")
 	} else {
-		allocation := turnClient.GetAllocation()
-		if allocation != nil {
-			relayAddr := allocation.LocalAddr()
-			if udpAddr, ok := relayAddr.(*net.UDPAddr); ok {
-				relayIP = udpAddr.IP.String()
-				relayPort = udpAddr.Port
-				log.Printf("✅ Relay IP: %s:%d", relayIP, relayPort)
-			}
+		// Get relay address from allocation
+		if ip, port, err := turnClient.GetRelayAddress(); err == nil {
+			relayIP = ip
+			relayPort = port
+			log.Printf("✅ Relay IP allocated: %s:%d", relayIP, relayPort)
+			log.Printf("   TURN allocation lifecycle: Created → KeepAlive (2min refresh) → Closed on exit")
+		} else {
+			log.Printf("⚠️  Failed to get relay address: %v", err)
 		}
 	}
-	defer turnClient.Close()
+	// Note: Do NOT defer close here - TURN client lifecycle is managed by P2PManager
+	// It will be closed when P2P session terminates
 
 	// Step 6: Connect WebSocket and Register
 	log.Println("📍 Step 6: Connecting to WebSocket...")
@@ -191,8 +193,14 @@ func main() {
 	// Connection cache for tracking connection methods
 	connCache := NewConnectionCache()
 
-	// Create P2P manager
+	// Create P2P manager (this will start TURN keepalive if allocation is valid)
 	p2pManager := NewP2PManager(udpConn, turnClient)
+	
+	// Ensure TURN keepalive is started if allocation exists
+	// (It should already be started in NewP2PManager, but double-check)
+	if turnClient != nil && turnClient.IsAllocationValid() {
+		turnClient.StartKeepalive()
+	}
 
 	// Step 6.7: Handle incoming messages (peer_online notifications, etc.)
 	signaling.StartMessageHandler(func(msg SignalingMessage) {
@@ -375,4 +383,16 @@ func main() {
 		connCache.Remove(peerID)
 	}
 	peerCacheMu.RUnlock()
+	
+	// Close P2P manager (this will stop TURN keepalive)
+	if p2pManager != nil {
+		p2pManager.Close()
+	}
+	
+	// Close TURN client (this will stop keepalive and close allocation)
+	if turnClient != nil {
+		turnClient.Close()
+	}
+	
+	log.Println("✅ Cleanup complete")
 }

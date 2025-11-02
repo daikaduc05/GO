@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pion/turn/v2"
@@ -21,11 +22,15 @@ type TURNAllocation interface {
 
 // TURNClient handles TURN relay connection
 type TURNClient struct {
-	config     *Config
-	client     *turn.Client
-	allocation net.PacketConn // For backward compatibility (used as PacketConn)
+	config        *Config
+	client        *turn.Client
+	udpConn       *net.UDPConn // Store UDP connection for refresh
+	allocation    net.PacketConn // For backward compatibility (used as PacketConn)
 	allocationObj TURNAllocation // Store actual allocation object for CreatePermission/SendTo
-	logger     *log.Logger
+	lastRefresh   time.Time      // Track last refresh time
+	mu            sync.RWMutex   // Protect allocation access
+	logger        *log.Logger
+	stopKeepalive chan struct{} // Channel to stop keepalive goroutine
 }
 
 // NewTURNClient creates a new TURN client
@@ -133,44 +138,207 @@ func (tc *TURNClient) Connect(udpConn *net.UDPConn) error {
 			return fmt.Errorf("TURN allocation returned nil connection")
 		}
 		
+		tc.mu.Lock()
 		tc.allocation = result.conn
+		tc.udpConn = udpConn
 		// Store allocation object for CreatePermission/SendTo methods
 		if result.conn != nil {
 			// Type assert to get access to CreatePermission/SendTo methods
 			// The allocation returned from client.Allocate() implements these methods
 			allocObj, ok := result.conn.(TURNAllocation)
 			if !ok {
+				tc.mu.Unlock()
 				return fmt.Errorf("TURN allocation does not implement TURNAllocation interface")
 			}
 			tc.allocationObj = allocObj
+			tc.lastRefresh = time.Now()
 		}
 		relayAddr := result.conn.LocalAddr()
+		tc.mu.Unlock()
+		
 		tc.logger.Printf("✅ TURN allocation created successfully")
 		tc.logger.Printf("   Relay address: %s", relayAddr)
+		tc.logger.Printf("   Allocation will be refreshed every 2 minutes")
 		return nil
 	}
 }
 
 // GetAllocation returns the TURN allocation connection (as PacketConn)
 func (tc *TURNClient) GetAllocation() net.PacketConn {
+	tc.mu.RLock()
+	defer tc.mu.RUnlock()
 	return tc.allocation
 }
 
 // GetAllocationObj returns the TURN allocation object with CreatePermission/SendTo methods
 func (tc *TURNClient) GetAllocationObj() TURNAllocation {
+	tc.mu.RLock()
+	defer tc.mu.RUnlock()
 	return tc.allocationObj
+}
+
+// GetRelayAddress returns the current relay address from allocation
+func (tc *TURNClient) GetRelayAddress() (string, int, error) {
+	tc.mu.RLock()
+	defer tc.mu.RUnlock()
+	
+	if tc.allocation == nil {
+		return "", 0, fmt.Errorf("TURN allocation not available")
+	}
+	
+	relayAddr := tc.allocation.LocalAddr()
+	if udpAddr, ok := relayAddr.(*net.UDPAddr); ok {
+		return udpAddr.IP.String(), udpAddr.Port, nil
+	}
+	return "", 0, fmt.Errorf("failed to get relay address")
+}
+
+// RefreshAllocation refreshes the TURN allocation by creating a new one
+func (tc *TURNClient) RefreshAllocation() error {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	
+	if tc.udpConn == nil {
+		return fmt.Errorf("UDP connection not available for refresh")
+	}
+	
+	if tc.client == nil {
+		return fmt.Errorf("TURN client not initialized")
+	}
+	
+	tc.logger.Printf("🔄 Refreshing TURN allocation...")
+	
+	// Close old allocation if exists
+	if tc.allocation != nil {
+		tc.allocation.Close()
+		tc.allocation = nil
+		tc.allocationObj = nil
+	}
+	
+	// Create new allocation
+	allocCtx, allocCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer allocCancel()
+	
+	allocChan := make(chan struct {
+		conn net.PacketConn
+		err  error
+	}, 1)
+	
+	go func() {
+		allocation, err := tc.client.Allocate()
+		if err != nil {
+			allocChan <- struct {
+				conn net.PacketConn
+				err  error
+			}{nil, err}
+			return
+		}
+		allocChan <- struct {
+			conn net.PacketConn
+			err  error
+		}{allocation, nil}
+	}()
+	
+	// Wait for allocation or timeout
+	select {
+	case <-allocCtx.Done():
+		return fmt.Errorf("TURN allocation refresh timeout after 10s")
+	case result := <-allocChan:
+		if result.err != nil {
+			return fmt.Errorf("TURN allocation refresh failed: %w", result.err)
+		}
+		
+		if result.conn == nil {
+			return fmt.Errorf("TURN allocation refresh returned nil connection")
+		}
+		
+		tc.allocation = result.conn
+		allocObj, ok := result.conn.(TURNAllocation)
+		if !ok {
+			return fmt.Errorf("TURN allocation does not implement TURNAllocation interface")
+		}
+		tc.allocationObj = allocObj
+		tc.lastRefresh = time.Now()
+		
+		relayAddr := result.conn.LocalAddr()
+		tc.logger.Printf("✅ TURN allocation refreshed successfully")
+		tc.logger.Printf("   New relay address: %s", relayAddr)
+		return nil
+	}
+}
+
+// IsAllocationValid checks if allocation exists and is not expired
+func (tc *TURNClient) IsAllocationValid() bool {
+	tc.mu.RLock()
+	defer tc.mu.RUnlock()
+	return tc.allocation != nil && tc.allocationObj != nil
+}
+
+// StartKeepalive starts a goroutine that refreshes allocation every 2 minutes
+func (tc *TURNClient) StartKeepalive() {
+	if tc.stopKeepalive != nil {
+		// Already running
+		return
+	}
+	
+	tc.stopKeepalive = make(chan struct{})
+	
+	go func() {
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ticker.C:
+				if !tc.IsAllocationValid() {
+					tc.logger.Printf("⚠️  TURN allocation invalid, attempting refresh...")
+				} else {
+					tc.logger.Printf("🔄 Refreshing TURN allocation (periodic keepalive)...")
+				}
+				
+				if err := tc.RefreshAllocation(); err != nil {
+					tc.logger.Printf("❌ Failed to refresh TURN allocation: %v", err)
+					// Continue trying - allocation might still work
+				}
+				
+			case <-tc.stopKeepalive:
+				tc.logger.Printf("🛑 Stopping TURN keepalive")
+				return
+			}
+		}
+	}()
+	
+	tc.logger.Printf("✅ TURN keepalive started (refresh every 2 minutes)")
+}
+
+// StopKeepalive stops the keepalive goroutine
+func (tc *TURNClient) StopKeepalive() {
+	if tc.stopKeepalive != nil {
+		close(tc.stopKeepalive)
+		tc.stopKeepalive = nil
+	}
 }
 
 // Close closes TURN connection
 func (tc *TURNClient) Close() error {
-	tc.logger.Println("Closing TURN client")
+	tc.logger.Println("🔌 Closing TURN client...")
+	
+	// Stop keepalive first
+	tc.StopKeepalive()
+	
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
 	
 	if tc.allocation != nil {
 		tc.allocation.Close()
+		tc.allocation = nil
+		tc.allocationObj = nil
 	}
 	if tc.client != nil {
 		tc.client.Close()
+		tc.client = nil
 	}
 	
+	tc.logger.Println("✅ TURN client closed")
 	return nil
 }
