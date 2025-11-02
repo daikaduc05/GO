@@ -45,8 +45,9 @@ func main() {
 		log.Println("✅ Token obtained")
 	}
 
-	// Create UDP socket for STUN/TURN
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	// Create UDP socket for STUN/TURN (bind to IPv4 only)
+	// Use udp4 instead of udp to force IPv4-only socket
+	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
 		log.Fatalf("Failed to create UDP socket: %v", err)
 	}

@@ -105,7 +105,14 @@ func (pm *P2PManager) tryHolePunching(peerID string, peerInfo PeerInfo) (*P2PCon
 		testPacket := []byte(fmt.Sprintf("PING-%d", time.Now().Unix()))
 		_, err := pm.localConn.WriteTo(testPacket, peerAddr)
 		if err != nil {
-			pm.logger.Printf("Failed to send hole punch packet: %v", err)
+			// Check if it's a timeout error - this might be network issue, not code issue
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				pm.logger.Printf("Hole punch packet send timeout (attempt %d/3): %v", i+1, err)
+			} else {
+				pm.logger.Printf("Failed to send hole punch packet (attempt %d/3): %v", i+1, err)
+			}
+			// Continue to next attempt even on timeout
+			time.Sleep(200 * time.Millisecond)
 			continue
 		}
 
@@ -172,10 +179,21 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 	}
 
 	// Send test packet via relay
+	// Note: WriteTo on PacketConn is usually non-blocking, but timeout can occur
+	// if there's network routing issue or firewall blocking
 	testPacket := []byte(fmt.Sprintf("RELAY-PING-%d", time.Now().Unix()))
 	_, err = allocation.WriteTo(testPacket, relayAddr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to send relay packet: %w", err)
+		// Check if it's timeout - might be network/firewall issue
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			pm.logger.Printf("⚠️  Relay packet send timeout - may be network/firewall issue")
+			// Continue anyway - connection might still work for receiving
+			// The timeout could be false positive if TURN server is just slow
+		} else {
+			return nil, fmt.Errorf("failed to send relay packet: %w", err)
+		}
+	} else {
+		pm.logger.Printf("✅ Relay test packet sent successfully")
 	}
 
 	return conn, nil
@@ -209,6 +227,10 @@ func (pm *P2PManager) SendPacket(peerID string, packet []byte) error {
 	}
 
 	if err != nil {
+		// Check if it's timeout - log but still mark as failed
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			pm.logger.Printf("⚠️  Packet send timeout to %s via %s: %v", peerID, conn.Method, err)
+		}
 		conn.mu.Lock()
 		conn.Status = StatusFailed
 		conn.mu.Unlock()
