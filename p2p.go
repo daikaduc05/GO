@@ -183,15 +183,20 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 	}
 
 	// Create permission for peer's relay IP (required for Send Indication)
-	// CreatePermissions takes net.Addr, not net.IP
-	pm.logger.Printf("🔐 [TURN] Creating permission for peer relay IP: %s", relayAddr.String())
-	pm.logger.Printf("   Calling allocationObj.CreatePermissions(%s)...", relayAddr.String())
+	// Note: CreatePermission only needs IP address, not port (per RFC 5766)
+	// Permission is granted for the entire IP, allowing any port on that IP
+	relayIPOnly := &net.UDPAddr{
+		IP:   relayAddr.IP,
+		Port: 0, // Port not needed for permission, but net.Addr requires it
+	}
+	pm.logger.Printf("🔐 [TURN] Creating permission for peer relay IP: %s (port not required for permission)", relayAddr.IP.String())
+	pm.logger.Printf("   Calling allocationObj.CreatePermissions(%s)...", relayIPOnly.String())
 	
-	if err := allocationObj.CreatePermissions(relayAddr); err != nil {
+	if err := allocationObj.CreatePermissions(relayIPOnly); err != nil {
 		pm.logger.Printf("❌ [TURN] Failed to create permission: %v", err)
 		return nil, fmt.Errorf("failed to create TURN permission: %w", err)
 	}
-	pm.logger.Printf("✅ [TURN] Permission created successfully for %s", relayAddr.String())
+	pm.logger.Printf("✅ [TURN] Permission created successfully for IP %s", relayAddr.IP.String())
 
 	conn := &P2PConnection{
 		PeerID:     peerID,
@@ -263,9 +268,13 @@ func (pm *P2PManager) SendPacket(peerID string, packet []byte) error {
 		if conn.RelayAlloc != nil {
 			// Check if permission needs refresh - for now, always refresh to be safe
 			// In production, you might want to cache permission creation time
-			// CreatePermissions takes net.Addr, not net.IP
-			if err := conn.RelayAlloc.CreatePermissions(conn.RelayAddr); err != nil {
-				pm.logger.Printf("⚠️  Failed to refresh/create permission for %s: %v", conn.RelayAddr.String(), err)
+			// Note: CreatePermission only needs IP address, not port (per RFC 5766)
+			relayIPOnly := &net.UDPAddr{
+				IP:   conn.RelayAddr.IP,
+				Port: 0, // Port not needed for permission, but net.Addr requires it
+			}
+			if err := conn.RelayAlloc.CreatePermissions(relayIPOnly); err != nil {
+				pm.logger.Printf("⚠️  Failed to refresh/create permission for IP %s: %v", conn.RelayAddr.IP.String(), err)
 				// Continue anyway - permission might still be valid
 			}
 		}
