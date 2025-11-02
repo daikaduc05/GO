@@ -182,6 +182,12 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 	// Note: WriteTo on PacketConn is usually non-blocking, but timeout can occur
 	// if there's network routing issue or firewall blocking
 	testPacket := []byte(fmt.Sprintf("RELAY-PING-%d", time.Now().Unix()))
+	localAddr := allocation.LocalAddr()
+	pm.logger.Printf("📤 [TURN->Relay] Sending test packet:")
+	pm.logger.Printf("   From: %s (TURN allocation)", localAddr)
+	pm.logger.Printf("   To: %s:%d (peer relay address)", relayAddr.IP, relayAddr.Port)
+	pm.logger.Printf("   Packet size: %d bytes", len(testPacket))
+	pm.logger.Printf("   Packet content: %s", string(testPacket))
 	_, err = allocation.WriteTo(testPacket, relayAddr)
 	if err != nil {
 		// Check if it's timeout - might be network/firewall issue
@@ -223,7 +229,25 @@ func (pm *P2PManager) SendPacket(peerID string, packet []byte) error {
 	if conn.Method == MethodHole {
 		_, err = conn.Conn.WriteTo(packet, conn.PeerAddr)
 	} else {
+		// Log TURN relay packet send details
+		localAddr := conn.RelayConn.LocalAddr()
+		pm.logger.Printf("📤 [TURN->Relay] Sending packet to peer %s:", peerID)
+		pm.logger.Printf("   From: %s (TURN allocation)", localAddr)
+		pm.logger.Printf("   To: %s:%d (peer relay address)", conn.RelayAddr.IP, conn.RelayAddr.Port)
+		pm.logger.Printf("   Packet size: %d bytes", len(packet))
+		// Show packet preview (first 100 bytes or less)
+		previewLen := len(packet)
+		if previewLen > 100 {
+			previewLen = 100
+		}
+		pm.logger.Printf("   Packet preview (first %d bytes): %x", previewLen, packet[:previewLen])
+		if len(packet) <= 100 {
+			pm.logger.Printf("   Packet content (as string): %s", string(packet))
+		}
 		_, err = conn.RelayConn.WriteTo(packet, conn.RelayAddr)
+		if err == nil {
+			pm.logger.Printf("   ✅ Packet sent successfully")
+		}
 	}
 
 	if err != nil {
