@@ -141,28 +141,38 @@ func (pm *P2PManager) tryHolePunching(peerID string, peerInfo PeerInfo) (*P2PCon
 
 // tryRelay establishes connection via TURN relay
 func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection, error) {
+	pm.logger.Printf("🔍 [tryRelay] Starting relay connection for peer %s", peerID)
+	
 	if pm.turnClient == nil {
+		pm.logger.Printf("❌ [tryRelay] TURN client is nil")
 		return nil, fmt.Errorf("TURN client not available")
 	}
 
 	allocation := pm.turnClient.GetAllocation()
 	if allocation == nil {
+		pm.logger.Printf("❌ [tryRelay] TURN allocation is nil")
 		return nil, fmt.Errorf("TURN allocation not available")
 	}
+	pm.logger.Printf("✅ [tryRelay] TURN allocation found: %s", allocation.LocalAddr())
 
 	allocationObj := pm.turnClient.GetAllocationObj()
 	if allocationObj == nil {
+		pm.logger.Printf("❌ [tryRelay] TURN allocation object is nil")
 		return nil, fmt.Errorf("TURN allocation object not available")
 	}
+	pm.logger.Printf("✅ [tryRelay] TURN allocation object found")
 
 	if peerInfo.RelayIP == "" || peerInfo.RelayPort == 0 {
+		pm.logger.Printf("❌ [tryRelay] Peer has no relay IP/port (RelayIP=%s, RelayPort=%d)", peerInfo.RelayIP, peerInfo.RelayPort)
 		return nil, fmt.Errorf("peer has no relay IP/port")
 	}
 
 	relayAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", peerInfo.RelayIP, peerInfo.RelayPort))
 	if err != nil {
+		pm.logger.Printf("❌ [tryRelay] Failed to resolve relay address: %v", err)
 		return nil, fmt.Errorf("failed to resolve relay address: %w", err)
 	}
+	pm.logger.Printf("✅ [tryRelay] Relay address resolved: %s:%d", relayAddr.IP, relayAddr.Port)
 
 	// Also resolve public address for matching packets received via relay
 	var peerAddr *net.UDPAddr
@@ -172,10 +182,13 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 
 	// Create permission for peer's relay IP (required for Send Indication)
 	pm.logger.Printf("🔐 [TURN] Creating permission for peer relay IP: %s", relayAddr.IP.String())
+	pm.logger.Printf("   Calling allocationObj.CreatePermission(%s)...", relayAddr.IP.String())
+	
 	if err := allocationObj.CreatePermission(relayAddr.IP); err != nil {
+		pm.logger.Printf("❌ [TURN] Failed to create permission: %v", err)
 		return nil, fmt.Errorf("failed to create TURN permission: %w", err)
 	}
-	pm.logger.Printf("✅ [TURN] Permission created for %s", relayAddr.IP.String())
+	pm.logger.Printf("✅ [TURN] Permission created successfully for %s", relayAddr.IP.String())
 
 	conn := &P2PConnection{
 		PeerID:     peerID,
