@@ -714,6 +714,7 @@ func (pm *P2PManager) StartPacketReceiver(onPacket func(peerID string, packet []
 		}
 
 		buffer := make([]byte, 1500)
+		pm.logger.Printf("🔄 [TURN Receiver] Started listening for packets from relay...")
 		for {
 			n, addr, err := allocation.ReadFrom(buffer)
 			if err != nil {
@@ -723,9 +724,39 @@ func (pm *P2PManager) StartPacketReceiver(onPacket func(peerID string, packet []
 					continue
 				}
 				// Log other errors
-				pm.logger.Printf("Relay read error: %v", err)
+				pm.logger.Printf("❌ [TURN Receiver] Relay read error: %v", err)
 				continue
 			}
+
+			// Log ngay khi nhận được packet (trước khi match)
+			localAddr := allocation.LocalAddr()
+			pm.logger.Printf("🎯 [TURN Receiver] ========== PACKET RECEIVED ==========")
+			pm.logger.Printf("   ✅ Received packet from relay allocation!")
+			pm.logger.Printf("   📍 Allocation address: %s", localAddr)
+			pm.logger.Printf("   📍 Source address (from relay): %s", addr)
+			pm.logger.Printf("   📦 Packet size: %d bytes", n)
+			
+			// Parse IP header để log dest IP
+			if n >= 20 { // Minimum IP header size
+				destIP := net.IP(buffer[16:20]).String()
+				srcIP := net.IP(buffer[12:16]).String()
+				protocol := buffer[9]
+				pm.logger.Printf("   📋 IP Header:")
+				pm.logger.Printf("      - Source IP: %s", srcIP)
+				pm.logger.Printf("      - Dest IP: %s", destIP)
+				pm.logger.Printf("      - Protocol: %d (1=ICMP, 17=UDP, 6=TCP)", protocol)
+			}
+			
+			// Show packet preview
+			previewLen := n
+			if previewLen > 100 {
+				previewLen = 100
+			}
+			pm.logger.Printf("   📄 Packet preview (first %d bytes): %x", previewLen, buffer[:previewLen])
+			if n <= 100 {
+				pm.logger.Printf("   📄 Packet as string: %s", string(buffer[:n]))
+			}
+			pm.logger.Printf("   🔍 Attempting to match with peer connection...")
 
 			// Find connection by relay address or public address
 			// TURN relay may return either relay address or peer's public address
@@ -760,37 +791,15 @@ func (pm *P2PManager) StartPacketReceiver(onPacket func(peerID string, packet []
 			pm.mu.RUnlock()
 
 			if peerID != "" {
-				localAddr := allocation.LocalAddr()
-				pm.logger.Printf("📥 [TURN<-Relay] Received packet from peer %s:", peerID)
-				pm.logger.Printf("   Received at: %s (TURN allocation)", localAddr)
-				pm.logger.Printf("   From address: %s (as returned by relay)", addr)
-				pm.logger.Printf("   Packet size: %d bytes", n)
-				// Show packet preview (first 100 bytes or less)
-				previewLen := n
-				if previewLen > 100 {
-					previewLen = 100
-				}
-				pm.logger.Printf("   Packet preview (first %d bytes): %x", previewLen, buffer[:previewLen])
-				if n <= 100 {
-					pm.logger.Printf("   Packet content (as string): %s", string(buffer[:n]))
-				}
+				pm.logger.Printf("   ✅ Matched with peer: %s", peerID)
+				pm.logger.Printf("   📤 Forwarding packet to callback (onPacket)...")
+				pm.logger.Printf("   ========================================")
 				onPacket(peerID, buffer[:n])
+				pm.logger.Printf("   ✅ Callback completed for peer %s", peerID)
 			} else {
-				localAddr := allocation.LocalAddr()
-				pm.logger.Printf("⚠️  [TURN<-Relay] Received packet from unknown relay address:")
-				pm.logger.Printf("   Received at: %s (TURN allocation)", localAddr)
-				pm.logger.Printf("   From address: %s (as returned by relay)", addr)
-				pm.logger.Printf("   Packet size: %d bytes", n)
-				// Show packet preview
-				previewLen := n
-				if previewLen > 100 {
-					previewLen = 100
-				}
-				pm.logger.Printf("   Packet preview (first %d bytes): %x", previewLen, buffer[:previewLen])
-				if n <= 100 {
-					pm.logger.Printf("   Packet content (as string): %s", string(buffer[:n]))
-				}
-				pm.logger.Printf("   (trying to match...)")
+				pm.logger.Printf("   ⚠️  No match found for address: %s", addr)
+				pm.logger.Printf("   🔍 Trying fallback matching...")
+				
 				// Try to find any relay connection and use it (fallback)
 				// This handles cases where TURN returns a different address format
 				pm.mu.RLock()
@@ -798,6 +807,7 @@ func (pm *P2PManager) StartPacketReceiver(onPacket func(peerID string, packet []
 				for pid, conn := range pm.connections {
 					if conn.Method == MethodRelay && conn.Status == StatusConnected {
 						relayConnections = append(relayConnections, pid)
+						pm.logger.Printf("   📋 Found relay connection: %s (status: %s)", pid, conn.Status)
 					}
 				}
 				pm.mu.RUnlock()
@@ -805,21 +815,15 @@ func (pm *P2PManager) StartPacketReceiver(onPacket func(peerID string, packet []
 				// If we only have one relay connection, assume it's from that peer
 				if len(relayConnections) == 1 {
 					peerID = relayConnections[0]
-					localAddr := allocation.LocalAddr()
-					pm.logger.Printf("📥 [TURN<-Relay] Assumed packet from %s (only relay connection):", peerID)
-					pm.logger.Printf("   Received at: %s (TURN allocation)", localAddr)
-					pm.logger.Printf("   From address: %s (as returned by relay)", addr)
-					pm.logger.Printf("   Packet size: %d bytes", n)
-					// Show packet preview
-					previewLen := n
-					if previewLen > 100 {
-						previewLen = 100
-					}
-					pm.logger.Printf("   Packet preview (first %d bytes): %x", previewLen, buffer[:previewLen])
-					if n <= 100 {
-						pm.logger.Printf("   Packet content (as string): %s", string(buffer[:n]))
-					}
+					pm.logger.Printf("   ✅ Fallback: Assuming packet from %s (only relay connection)", peerID)
+					pm.logger.Printf("   📤 Forwarding packet to callback...")
+					pm.logger.Printf("   ========================================")
 					onPacket(peerID, buffer[:n])
+					pm.logger.Printf("   ✅ Callback completed for peer %s", peerID)
+				} else {
+					pm.logger.Printf("   ❌ Cannot determine peer - found %d relay connections", len(relayConnections))
+					pm.logger.Printf("   ❌ Packet dropped (no matching peer)")
+					pm.logger.Printf("   ========================================")
 				}
 			}
 		}

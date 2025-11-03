@@ -333,16 +333,49 @@ func main() {
 		
 		// Start P2P packet receiver to inject packets back into TUN
 		p2pManager.StartPacketReceiver(func(peerID string, packet []byte) {
-			log.Printf("📥 Received packet from P2P (%s): %d bytes", peerID, len(packet))
+			log.Printf("📥 [TUN Handler] ========== CALLBACK TRIGGERED ==========")
+			log.Printf("   ✅ Received packet from P2P peer: %s", peerID)
+			log.Printf("   📦 Packet size: %d bytes", len(packet))
+			
+			// Parse IP header for logging
+			if len(packet) >= 20 {
+				destIP := net.IP(packet[16:20]).String()
+				srcIP := net.IP(packet[12:16]).String()
+				protocol := packet[9]
+				log.Printf("   📋 IP Header:")
+				log.Printf("      - Source IP: %s", srcIP)
+				log.Printf("      - Dest IP: %s", destIP)
+				log.Printf("      - Protocol: %d", protocol)
+			}
 			
 			// Inject packet into TUN interface
-			if tunIface != nil && tunIface.GetInterface() != nil {
-				if _, err := tunIface.Write(packet); err != nil {
-					log.Printf("❌ Failed to inject packet into TUN: %v", err)
-				} else {
-					log.Printf("✅ Packet injected into TUN")
-				}
+			if tunIface == nil {
+				log.Printf("   ❌ TUN interface is nil - cannot inject packet")
+				return
 			}
+			
+			if tunIface.GetInterface() == nil {
+				log.Printf("   ❌ TUN interface.GetInterface() is nil - cannot inject packet")
+				return
+			}
+			
+			log.Printf("   📤 Injecting packet into TUN interface...")
+			log.Printf("   📍 TUN interface name: %s", tunIface.Name())
+			
+			n, err := tunIface.Write(packet)
+			if err != nil {
+				log.Printf("   ❌ FAILED to inject packet into TUN: %v", err)
+				log.Printf("   ========================================")
+				return
+			}
+			
+			log.Printf("   ✅ SUCCESS! Packet injected into TUN")
+			log.Printf("   ✅ Bytes written: %d (expected: %d)", n, len(packet))
+			if n != len(packet) {
+				log.Printf("   ⚠️  Warning: Partial write (%d/%d bytes)", n, len(packet))
+			}
+			log.Printf("   ✅ Packet should now be available in TUN interface")
+			log.Printf("   ========================================")
 		})
 	}
 
