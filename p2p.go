@@ -22,10 +22,11 @@ type P2PConnection struct {
 	RelayAddr  *net.UDPAddr    // Relay destination address
 	PublicIP   string
 	PublicPort int
-	RelayIP    string
-	RelayPort  int
-	LastUsed   time.Time
-	mu         sync.RWMutex
+	RelayIP       string
+	RelayPort     int
+	PermissionTime time.Time // When permission was last created (to avoid spam)
+	LastUsed      time.Time
+	mu            sync.RWMutex
 }
 
 // P2PManager manages all P2P connections
@@ -515,18 +516,19 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 	pm.logger.Printf("   allocationObj from GetAllocationObj(): %v (type: %T, nil=%v)", allocationObj, allocationObj, allocationObj == nil)
 	
 	conn := &P2PConnection{
-		PeerID:     peerID,
-		Method:     MethodRelay,
-		Status:     StatusConnected,
-		RelayConn:  allocation,
-		RelayAlloc: allocationObj, // Keep for backward compatibility
-		RelayAddr:  relayAddr,
-		PeerAddr:   peerAddr, // Store public address for matching received packets
-		PublicIP:   peerInfo.PublicIP,
-		PublicPort: peerInfo.PublicPort,
-		RelayIP:    peerInfo.RelayIP,
-		RelayPort:  peerInfo.RelayPort,
-		LastUsed:   time.Now(),
+		PeerID:         peerID,
+		Method:         MethodRelay,
+		Status:         StatusConnected,
+		RelayConn:      allocation,
+		RelayAlloc:     allocationObj, // Keep for backward compatibility
+		RelayAddr:      relayAddr,
+		PeerAddr:       peerAddr, // Store public address for matching received packets
+		PublicIP:       peerInfo.PublicIP,
+		PublicPort:     peerInfo.PublicPort,
+		RelayIP:        peerInfo.RelayIP,
+		RelayPort:      peerInfo.RelayPort,
+		PermissionTime: time.Now(), // Permission already created in tryRelay
+		LastUsed:       time.Now(),
 	}
 	
 	pm.logger.Printf("✅ P2PConnection created:")
@@ -572,10 +574,16 @@ func (pm *P2PManager) SendPacket(peerID string, packet []byte) error {
 	if conn.Method == MethodHole {
 		_, err = conn.Conn.WriteTo(packet, conn.PeerAddr)
 	} else {
-		// Ensure permission exists for peer's relay IP (permissions expire after 5 minutes)
-		// Check if permission needs refresh - for now, always refresh to be safe
-		// In production, you might want to cache permission creation time
-		if conn.RelayConn != nil {
+		// Check if permission needs refresh (permissions expire after 5 minutes = 300 seconds)
+		// Only create/refresh permission if:
+		// 1. Never created before (PermissionTime is zero)
+		// 2. Created more than 4 minutes ago (refresh before 5-minute expiry)
+		conn.mu.RLock()
+		needsPermission := conn.PermissionTime.IsZero() || time.Since(conn.PermissionTime) > 4*time.Minute
+		permissionAge := time.Since(conn.PermissionTime)
+		conn.mu.RUnlock()
+		
+		if needsPermission && conn.RelayAlloc != nil {
 			relayIP := conn.RelayAddr.IP
 			relayIPAddr := &net.UDPAddr{
 				IP:   relayIP,
@@ -587,16 +595,31 @@ func (pm *P2PManager) SendPacket(peerID string, packet []byte) error {
 				net.PacketConn
 				CreatePermissions(addrs ...net.Addr) error
 			}
-			if alloc, ok := conn.RelayConn.(allocationWithPermissions); ok {
+			
+			if alloc, ok := conn.RelayAlloc.(allocationWithPermissions); ok {
+				if conn.PermissionTime.IsZero() {
+					pm.logger.Printf("🔐 [SendPacket] Creating permission for %s (first time)", relayIP.String())
+				} else {
+					pm.logger.Printf("🔐 [SendPacket] Refreshing permission for %s (last created %v ago)", 
+						relayIP.String(), permissionAge)
+				}
+				
 				if err := alloc.CreatePermissions(relayIPAddr); err != nil {
-					pm.logger.Printf("⚠️  Failed to refresh/create permission for IP %s: %v", relayIP.String(), err)
+					pm.logger.Printf("⚠️  Failed to create/refresh permission for IP %s: %v", relayIP.String(), err)
 					// Continue anyway - permission might still be valid
+				} else {
+					// Update permission creation time
+					conn.mu.Lock()
+					conn.PermissionTime = time.Now()
+					conn.mu.Unlock()
+					pm.logger.Printf("✅ [SendPacket] Permission created/refreshed successfully")
 				}
 			} else {
 				pm.logger.Printf("⚠️  Failed to type assert allocation to access CreatePermissions")
 				// Continue anyway - might still work if permission is already valid
 			}
 		}
+		// Permission still valid - no logging to avoid spam (already created in tryRelay or refreshed above)
 
 		// Log TURN relay packet send details
 		localAddr := conn.RelayConn.LocalAddr()
