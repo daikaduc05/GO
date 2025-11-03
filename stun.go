@@ -60,8 +60,17 @@ func (sc *STUNClient) GetPublicAddress(localConn *net.UDPConn) (string, int, err
 	buffer := make([]byte, 1024)
 	n, _, err := localConn.ReadFromUDP(buffer)
 	if err != nil {
+		// Clear deadlines even on error
+		localConn.SetReadDeadline(time.Time{})
+		localConn.SetWriteDeadline(time.Time{})
 		return "", 0, fmt.Errorf("failed to read STUN response: %w", err)
 	}
+
+	// CRITICAL: Clear deadlines immediately after STUN operation
+	// The same UDP connection will be used for TURN, and leftover deadlines
+	// will cause immediate timeout in CreatePermissions/WriteTo
+	localConn.SetReadDeadline(time.Time{})
+	localConn.SetWriteDeadline(time.Time{})
 
 	// Parse STUN response
 	var response stun.Message
@@ -80,5 +89,6 @@ func (sc *STUNClient) GetPublicAddress(localConn *net.UDPConn) (string, int, err
 	publicPort := mappedAddr.Port
 
 	sc.logger.Printf("✅ Public address: %s:%d", publicIP, publicPort)
+	sc.logger.Printf("🔧 Deadlines cleared from UDP connection (ready for TURN)")
 	return publicIP, publicPort, nil
 }

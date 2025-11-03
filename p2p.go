@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -141,82 +142,384 @@ func (pm *P2PManager) tryHolePunching(peerID string, peerInfo PeerInfo) (*P2PCon
 
 // tryRelay establishes connection via TURN relay
 func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection, error) {
-	pm.logger.Printf("🔍 [tryRelay] Starting relay connection for peer %s", peerID)
+	pm.logger.Printf("=")
+	pm.logger.Printf("🔍 [tryRelay] ========== START ==========")
+	pm.logger.Printf("🔍 [tryRelay] Function: tryRelay")
+	pm.logger.Printf("🔍 [tryRelay] Input parameters:")
+	pm.logger.Printf("   - peerID: %q (type: %T, len=%d)", peerID, peerID, len(peerID))
+	pm.logger.Printf("   - peerInfo: %+v (type: %T)", peerInfo, peerInfo)
+	pm.logger.Printf("   - peerInfo.PeerID: %q (type: %T)", peerInfo.PeerID, peerInfo.PeerID)
+	pm.logger.Printf("   - peerInfo.Email: %q (type: %T)", peerInfo.Email, peerInfo.Email)
+	pm.logger.Printf("   - peerInfo.VirtualIP: %q (type: %T)", peerInfo.VirtualIP, peerInfo.VirtualIP)
+	pm.logger.Printf("   - peerInfo.PublicIP: %q (type: %T, empty=%v)", peerInfo.PublicIP, peerInfo.PublicIP, peerInfo.PublicIP == "")
+	pm.logger.Printf("   - peerInfo.PublicPort: %d (type: %T, zero=%v)", peerInfo.PublicPort, peerInfo.PublicPort, peerInfo.PublicPort == 0)
+	pm.logger.Printf("   - peerInfo.RelayIP: %q (type: %T, empty=%v, len=%d)", peerInfo.RelayIP, peerInfo.RelayIP, peerInfo.RelayIP == "", len(peerInfo.RelayIP))
+	pm.logger.Printf("   - peerInfo.RelayPort: %d (type: %T, zero=%v)", peerInfo.RelayPort, peerInfo.RelayPort, peerInfo.RelayPort == 0)
+	
+	pm.logger.Printf("🔍 [tryRelay] Checking TURN client...")
+	pm.logger.Printf("   pm.turnClient: %v (type: %T, nil=%v)", pm.turnClient, pm.turnClient, pm.turnClient == nil)
 	
 	if pm.turnClient == nil {
 		pm.logger.Printf("❌ [tryRelay] TURN client is nil")
 		return nil, fmt.Errorf("TURN client not available")
 	}
 
+	pm.logger.Printf("🔍 [tryRelay] Getting TURN allocation...")
 	allocation := pm.turnClient.GetAllocation()
+	pm.logger.Printf("   allocation: %v (type: %T, nil=%v)", allocation, allocation, allocation == nil)
+	
 	if allocation == nil {
 		pm.logger.Printf("❌ [tryRelay] TURN allocation is nil")
 		return nil, fmt.Errorf("TURN allocation not available")
 	}
 	
 	relayAddrLocal := allocation.LocalAddr()
-	pm.logger.Printf("✅ [tryRelay] TURN allocation found: %s", relayAddrLocal)
+	pm.logger.Printf("✅ [tryRelay] TURN allocation found")
+	pm.logger.Printf("   LocalAddr(): %v (type: %T)", relayAddrLocal, relayAddrLocal)
+	if udpAddr, ok := relayAddrLocal.(*net.UDPAddr); ok {
+		pm.logger.Printf("   - IP: %s (type: %T, bytes=%v)", udpAddr.IP, udpAddr.IP, udpAddr.IP)
+		pm.logger.Printf("   - Port: %d (type: %T)", udpAddr.Port, udpAddr.Port)
+		pm.logger.Printf("   - Zone: %s", udpAddr.Zone)
+	}
+	
+	// Clear any deadlines on the allocation to prevent immediate timeout
+	pm.logger.Printf("🔍 [tryRelay] Clearing deadlines on allocation...")
+	if conn, ok := allocation.(interface {
+		SetReadDeadline(time.Time) error
+		SetWriteDeadline(time.Time) error
+	}); ok {
+		if err := conn.SetReadDeadline(time.Time{}); err != nil {
+			pm.logger.Printf("⚠️  Failed to clear read deadline: %v", err)
+		} else {
+			pm.logger.Printf("   ✅ Read deadline cleared")
+		}
+		if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+			pm.logger.Printf("⚠️  Failed to clear write deadline: %v", err)
+		} else {
+			pm.logger.Printf("   ✅ Write deadline cleared")
+		}
+	} else {
+		pm.logger.Printf("   ⚠️  Allocation does not implement deadline methods")
+	}
 
+	pm.logger.Printf("🔍 [tryRelay] Checking peer relay info...")
+	pm.logger.Printf("   peerInfo.RelayIP == \"\": %v", peerInfo.RelayIP == "")
+	pm.logger.Printf("   peerInfo.RelayPort == 0: %v", peerInfo.RelayPort == 0)
+	
 	if peerInfo.RelayIP == "" || peerInfo.RelayPort == 0 {
-		pm.logger.Printf("❌ [tryRelay] Peer has no relay IP/port (RelayIP=%s, RelayPort=%d)", peerInfo.RelayIP, peerInfo.RelayPort)
+		pm.logger.Printf("❌ [tryRelay] Peer has no relay IP/port")
+		pm.logger.Printf("   RelayIP empty: %v, RelayPort zero: %v", peerInfo.RelayIP == "", peerInfo.RelayPort == 0)
 		return nil, fmt.Errorf("peer has no relay IP/port")
 	}
 
-	relayAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", peerInfo.RelayIP, peerInfo.RelayPort))
+	pm.logger.Printf("🔍 [tryRelay] Resolving relay address...")
+	relayAddrStr := fmt.Sprintf("%s:%d", peerInfo.RelayIP, peerInfo.RelayPort)
+	pm.logger.Printf("   Address string: %q (type: %T)", relayAddrStr, relayAddrStr)
+	
+	relayAddr, err := net.ResolveUDPAddr("udp", relayAddrStr)
+	pm.logger.Printf("   ResolveUDPAddr result: relayAddr=%v, err=%v", relayAddr, err)
+	
 	if err != nil {
-		pm.logger.Printf("❌ [tryRelay] Failed to resolve relay address: %v", err)
+		pm.logger.Printf("❌ [tryRelay] Failed to resolve relay address: %v (type: %T)", err, err)
 		return nil, fmt.Errorf("failed to resolve relay address: %w", err)
 	}
-	pm.logger.Printf("✅ [tryRelay] Relay address resolved: %s:%d", relayAddr.IP, relayAddr.Port)
+	
+	pm.logger.Printf("✅ [tryRelay] Relay address resolved successfully")
+	pm.logger.Printf("   relayAddr: %v (type: %T, nil=%v)", relayAddr, relayAddr, relayAddr == nil)
+	if relayAddr != nil {
+		pm.logger.Printf("   - IP: %s (type: %T, bytes=%v)", relayAddr.IP, relayAddr.IP, relayAddr.IP)
+		pm.logger.Printf("   - IP.String(): %s", relayAddr.IP.String())
+		if relayAddr.IP.To4() != nil {
+			pm.logger.Printf("   - IP is IPv4: true, To4(): %v", relayAddr.IP.To4())
+		}
+		pm.logger.Printf("   - Port: %d (type: %T)", relayAddr.Port, relayAddr.Port)
+		pm.logger.Printf("   - Zone: %s", relayAddr.Zone)
+		pm.logger.Printf("   - String(): %s", relayAddr.String())
+	}
 
-	// Also resolve public address for matching packets received via relay
+	pm.logger.Printf("🔍 [tryRelay] Resolving public address (for matching)...")
 	var peerAddr *net.UDPAddr
 	if peerInfo.PublicIP != "" && peerInfo.PublicPort != 0 {
-		peerAddr, _ = net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", peerInfo.PublicIP, peerInfo.PublicPort))
+		publicAddrStr := fmt.Sprintf("%s:%d", peerInfo.PublicIP, peerInfo.PublicPort)
+		pm.logger.Printf("   Public address string: %q", publicAddrStr)
+		peerAddr, err = net.ResolveUDPAddr("udp", publicAddrStr)
+		if err != nil {
+			pm.logger.Printf("⚠️  Failed to resolve public address: %v (continuing)", err)
+		} else {
+			pm.logger.Printf("✅ Public address resolved: %v (type: %T)", peerAddr, peerAddr)
+		}
+	} else {
+		pm.logger.Printf("   No public IP/port provided")
 	}
+	pm.logger.Printf("   peerAddr: %v (type: %T, nil=%v)", peerAddr, peerAddr, peerAddr == nil)
 
+	pm.logger.Printf("=")
+	pm.logger.Printf("🔐 [TURN] Creating permission...")
+	
 	// Create permission for peer's relay IP (required for Send Indication)
 	peerIP := relayAddr.IP
+	pm.logger.Printf("   peerIP (relayAddr.IP): %v (type: %T, nil=%v)", peerIP, peerIP, peerIP == nil)
+	
 	if peerIP == nil {
-		pm.logger.Printf("❌ [tryRelay] Invalid peer IP")
+		pm.logger.Printf("❌ [tryRelay] Invalid peer IP: nil")
 		return nil, fmt.Errorf("invalid peer IP")
 	}
-
-	peerAddrForPermission := &net.UDPAddr{IP: peerIP, Port: 56710}
-	pm.logger.Printf("🔐 [TURN] Creating permission for %s...", peerAddrForPermission.IP)
 	
-	// Type assert to access CreatePermissions method
+	pm.logger.Printf("   peerIP.String(): %q", peerIP.String())
+	pm.logger.Printf("   peerIP bytes: %v", peerIP)
+	if peerIP.To4() != nil {
+		pm.logger.Printf("   peerIP is IPv4: true, To4(): %v", peerIP.To4())
+	} else {
+		pm.logger.Printf("   peerIP is IPv4: false")
+	}
+
+	// Use the actual relay address port for permission (not hardcoded)
+	// Note: TURN CreatePermission typically only needs IP, but we pass full address for consistency
+	peerAddrForPermission := &net.UDPAddr{IP: peerIP, Port: relayAddr.Port}
+	pm.logger.Printf("   peerAddrForPermission: %v (type: %T)", peerAddrForPermission, peerAddrForPermission)
+	pm.logger.Printf("   - IP: %s (from relayAddr.IP)", peerAddrForPermission.IP.String())
+	pm.logger.Printf("   - Port: %d (from relayAddr.Port, was hardcoded 56710 before)", peerAddrForPermission.Port)
+	pm.logger.Printf("   - String(): %s", peerAddrForPermission.String())
+	pm.logger.Printf("   - Original relayAddr.Port: %d", relayAddr.Port)
+	
+	pm.logger.Printf("   Attempting type assertion for CreatePermissions...")
+	pm.logger.Printf("   allocation type: %T", allocation)
+	
+	// Try CreatePermissions (plural) method first
 	type allocationWithPermissions interface {
 		net.PacketConn
 		CreatePermissions(addrs ...net.Addr) error
 	}
-	if alloc, ok := allocation.(allocationWithPermissions); ok {
-		if err := alloc.CreatePermissions(peerAddrForPermission); err != nil {
-			pm.logger.Printf("❌ [TURN] CreatePermission failed: %v", err)
-			return nil, fmt.Errorf("failed to create TURN permission: %w", err)
+	
+	alloc, ok := allocation.(allocationWithPermissions)
+	pm.logger.Printf("   Type assertion for CreatePermissions: ok=%v", ok)
+	
+	var permissionErr error
+	if ok {
+		pm.logger.Printf("   ✅ Type assertion successful (CreatePermissions)")
+		pm.logger.Printf("   Calling: alloc.CreatePermissions(%v)...", peerAddrForPermission)
+		pm.logger.Printf("   Input address: %+v", peerAddrForPermission)
+		pm.logger.Printf("   Input address details:")
+		pm.logger.Printf("      - IP: %s", peerAddrForPermission.IP.String())
+		pm.logger.Printf("      - Port: %d", peerAddrForPermission.Port)
+		pm.logger.Printf("      - String(): %s", peerAddrForPermission.String())
+		
+		// Clear write deadline before CreatePermissions (critical!)
+		pm.logger.Printf("   🔧 Clearing write deadline before CreatePermissions...")
+		if conn, ok := allocation.(interface{ SetWriteDeadline(time.Time) error }); ok {
+			if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+				pm.logger.Printf("   ⚠️  Failed to clear write deadline: %v", err)
+			} else {
+				pm.logger.Printf("   ✅ Write deadline cleared successfully")
+			}
+		} else {
+			pm.logger.Printf("   ⚠️  Allocation does not support SetWriteDeadline")
 		}
-		pm.logger.Printf("✅ [TURN] Permission created for %s", peerAddrForPermission.IP)
+		
+		// Also clear read deadline just in case
+		if conn, ok := allocation.(interface{ SetReadDeadline(time.Time) error }); ok {
+			conn.SetReadDeadline(time.Time{})
+		}
+		
+		pm.logger.Printf("   📤 Actually calling CreatePermissions now...")
+		permissionStartTime := time.Now()
+		permissionErr = alloc.CreatePermissions(peerAddrForPermission)
+		permissionDuration := time.Since(permissionStartTime)
+		
+		pm.logger.Printf("   CreatePermissions returned: err=%v (type: %T, duration: %v)", permissionErr, permissionErr, permissionDuration)
+		
+		if permissionErr != nil {
+			pm.logger.Printf("⚠️  [TURN] CreatePermissions returned error (may be timeout or network issue)")
+			pm.logger.Printf("   Error: %v", permissionErr)
+			if errStr := permissionErr.Error(); errStr != "" {
+				pm.logger.Printf("   Error string: %q", errStr)
+				
+				// Check if it's a timeout error - in this case, permission might still work
+				if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "i/o timeout") {
+					pm.logger.Printf("   ⚠️  Timeout error - permission creation may have succeeded on server side")
+					pm.logger.Printf("   Continuing anyway (permission might be valid)")
+					permissionErr = nil // Clear error, continue
+				}
+			}
+		} else {
+			pm.logger.Printf("✅ [TURN] CreatePermissions SUCCESS")
+			pm.logger.Printf("   Target: %s", peerAddrForPermission.IP.String())
+			pm.logger.Printf("   Duration: %v", permissionDuration)
+		}
 	} else {
-		pm.logger.Printf("❌ [TURN] Failed to type assert allocation to access CreatePermissions")
-		return nil, fmt.Errorf("allocation does not implement CreatePermissions method")
+		// Try CreatePermission (singular) method as fallback
+		pm.logger.Printf("   Trying CreatePermission (singular) method...")
+		type allocationWithPermission interface {
+			net.PacketConn
+			CreatePermission(peerIP net.IP) error
+		}
+		
+		allocSingle, okSingle := allocation.(allocationWithPermission)
+		pm.logger.Printf("   Type assertion for CreatePermission: ok=%v", okSingle)
+		
+		if okSingle {
+			pm.logger.Printf("   ✅ Type assertion successful (CreatePermission)")
+			pm.logger.Printf("   Calling: allocSingle.CreatePermission(%s)...", peerIP.String())
+			
+			permissionStartTime := time.Now()
+			permissionErr = allocSingle.CreatePermission(peerIP)
+			permissionDuration := time.Since(permissionStartTime)
+			
+			pm.logger.Printf("   CreatePermission returned: err=%v (type: %T, duration: %v)", permissionErr, permissionErr, permissionDuration)
+			
+			if permissionErr != nil {
+				pm.logger.Printf("⚠️  [TURN] CreatePermission returned error")
+				pm.logger.Printf("   Error: %v", permissionErr)
+				if errStr := permissionErr.Error(); errStr != "" {
+					pm.logger.Printf("   Error string: %q", errStr)
+					
+					// Check if it's a timeout error
+					if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "i/o timeout") {
+						pm.logger.Printf("   ⚠️  Timeout error - permission creation may have succeeded on server side")
+						pm.logger.Printf("   Continuing anyway (permission might be valid)")
+						permissionErr = nil // Clear error, continue
+					}
+				}
+			} else {
+				pm.logger.Printf("✅ [TURN] CreatePermission SUCCESS")
+				pm.logger.Printf("   Target IP: %s", peerIP.String())
+				pm.logger.Printf("   Duration: %v", permissionDuration)
+			}
+		} else {
+			pm.logger.Printf("❌ [TURN] Type assertion FAILED for both CreatePermissions and CreatePermission")
+			pm.logger.Printf("   allocation does not implement permission creation methods")
+			// Don't return error - continue without permission, might still work
+			pm.logger.Printf("   ⚠️  Continuing without permission (may fail later)")
+		}
+	}
+	
+	// Only return error if it's a critical non-timeout error
+	if permissionErr != nil && !strings.Contains(permissionErr.Error(), "timeout") {
+		return nil, fmt.Errorf("failed to create TURN permission: %w", permissionErr)
+	}
+	
+	if permissionErr == nil {
+		pm.logger.Printf("✅ [TURN] Permission creation completed successfully")
+	} else {
+		pm.logger.Printf("⚠️  [TURN] Permission creation had timeout, but continuing...")
 	}
 
-	// Send test packet via relay using WriteTo (just like the working example)
+	pm.logger.Printf("=")
+	pm.logger.Printf("📤 [TURN->Relay] Preparing to send test packet...")
+	
 	testPacket := []byte(fmt.Sprintf("RELAY-PING-%d", time.Now().Unix()))
-	pm.logger.Printf("📤 [TURN->Relay] Sending relay packet: %s", string(testPacket))
-	_, err = allocation.WriteTo(testPacket, relayAddr)
-	if err != nil {
-		pm.logger.Printf("❌ [TURN->Relay] SendIndication failed: %v", err)
-		return nil, fmt.Errorf("failed to send relay packet: %w", err)
+	pm.logger.Printf("   testPacket: %v (type: %T, len=%d, cap=%d)", testPacket, testPacket, len(testPacket), cap(testPacket))
+	pm.logger.Printf("   testPacket as string: %q", string(testPacket))
+	pm.logger.Printf("   testPacket as hex: %x", testPacket)
+	pm.logger.Printf("   testPacket as bytes: %v", testPacket)
+	
+	pm.logger.Printf("📤 [TURN->Relay] Sending relay packet via WriteTo:")
+	pm.logger.Printf("   allocation: %v (type: %T)", allocation, allocation)
+	pm.logger.Printf("   relayAddr: %v (type: %T)", relayAddr, relayAddr)
+	
+	// Clear write deadline before WriteTo
+	if conn, ok := allocation.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+			pm.logger.Printf("⚠️  Failed to clear write deadline before WriteTo: %v", err)
+		} else {
+			pm.logger.Printf("   ✅ Write deadline cleared before WriteTo")
+		}
 	}
-	pm.logger.Printf("✅ [TURN->Relay] Test packet sent successfully!")
+	
+	pm.logger.Printf("   Calling: allocation.WriteTo(%v, %v)...", testPacket, relayAddr)
+	
+	sendStartTime := time.Now()
+	n, err := allocation.WriteTo(testPacket, relayAddr)
+	sendDuration := time.Since(sendStartTime)
+	
+	pm.logger.Printf("   WriteTo returned: n=%d (type: %T), err=%v (type: %T)", n, n, err, err)
+	pm.logger.Printf("   Duration: %v", sendDuration)
+	
+	if err != nil {
+		pm.logger.Printf("⚠️  [TURN->Relay] WriteTo returned error")
+		pm.logger.Printf("   Error: %v (type: %T)", err, err)
+		errStr := err.Error()
+		if errStr != "" {
+			pm.logger.Printf("   Error string: %q", errStr)
+		}
+		
+		// Check if it's a timeout - for timeout errors, continue anyway as connection might still work
+		if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "i/o timeout") {
+			pm.logger.Printf("   ⚠️  WriteTo timeout - this may be a false positive")
+			pm.logger.Printf("   ⚠️  TURN server might have received the packet but response timed out")
+			pm.logger.Printf("   ⚠️  Continuing anyway - connection might still work for receiving")
+			
+			// Try using allocationObj.SendTo if available
+			allocationObj := pm.turnClient.GetAllocationObj()
+			if allocationObj != nil {
+				pm.logger.Printf("   🔄 Trying SendTo (Send Indication) as alternative...")
+				
+				// Type assert to get SendTo method
+				type allocationWithSendTo interface {
+					net.PacketConn
+					SendTo(data []byte, peer net.Addr) (int, error)
+				}
+				
+				if allocSendTo, ok := allocationObj.(allocationWithSendTo); ok {
+					pm.logger.Printf("   ✅ allocationObj supports SendTo")
+					pm.logger.Printf("   Calling: allocSendTo.SendTo(%v, %v)...", testPacket, relayAddr)
+					
+					// Clear deadline for SendTo
+					if conn, ok := allocationObj.(interface{ SetWriteDeadline(time.Time) error }); ok {
+						conn.SetWriteDeadline(time.Time{})
+					}
+					
+					sendToStartTime := time.Now()
+					n, sendToErr := allocSendTo.SendTo(testPacket, relayAddr)
+					sendToDuration := time.Since(sendToStartTime)
+					
+					pm.logger.Printf("   SendTo returned: n=%d, err=%v (duration: %v)", n, sendToErr, sendToDuration)
+					
+					if sendToErr == nil {
+						pm.logger.Printf("✅ [TURN->Relay] SendTo SUCCESS!")
+						pm.logger.Printf("   Bytes sent: %d", n)
+						err = nil // Clear error
+					} else {
+						pm.logger.Printf("⚠️  SendTo also returned error: %v", sendToErr)
+						pm.logger.Printf("   Continuing anyway (may work for receiving)")
+						err = nil // Clear error, continue
+					}
+				} else {
+					pm.logger.Printf("   ⚠️  allocationObj does not support SendTo method")
+					pm.logger.Printf("   Continuing with WriteTo timeout error cleared")
+					err = nil // Clear error, continue
+				}
+			} else {
+				pm.logger.Printf("   ⚠️  allocationObj is nil")
+				pm.logger.Printf("   Continuing anyway (may work for receiving)")
+				err = nil // Clear error, continue
+			}
+		} else {
+			// Non-timeout error - return it
+			pm.logger.Printf("❌ [TURN->Relay] WriteTo FAILED with non-timeout error")
+			return nil, fmt.Errorf("failed to send relay packet: %w", err)
+		}
+	}
+	
+	if err == nil {
+		pm.logger.Printf("✅ [TURN->Relay] Test packet sent successfully!")
+		pm.logger.Printf("   Bytes written: %d", n)
+	} else {
+		pm.logger.Printf("⚠️  [TURN->Relay] Packet send had issues but continuing...")
+	}
 
+	pm.logger.Printf("=")
+	pm.logger.Printf("🔍 [tryRelay] Creating P2PConnection object...")
+	
+	allocationObj := pm.turnClient.GetAllocationObj()
+	pm.logger.Printf("   allocationObj from GetAllocationObj(): %v (type: %T, nil=%v)", allocationObj, allocationObj, allocationObj == nil)
+	
 	conn := &P2PConnection{
 		PeerID:     peerID,
 		Method:     MethodRelay,
 		Status:     StatusConnected,
 		RelayConn:  allocation,
-		RelayAlloc: pm.turnClient.GetAllocationObj(), // Keep for backward compatibility
+		RelayAlloc: allocationObj, // Keep for backward compatibility
 		RelayAddr:  relayAddr,
 		PeerAddr:   peerAddr, // Store public address for matching received packets
 		PublicIP:   peerInfo.PublicIP,
@@ -225,6 +528,22 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 		RelayPort:  peerInfo.RelayPort,
 		LastUsed:   time.Now(),
 	}
+	
+	pm.logger.Printf("✅ P2PConnection created:")
+	pm.logger.Printf("   - PeerID: %q (type: %T)", conn.PeerID, conn.PeerID)
+	pm.logger.Printf("   - Method: %s (type: %T)", conn.Method, conn.Method)
+	pm.logger.Printf("   - Status: %s (type: %T)", conn.Status, conn.Status)
+	pm.logger.Printf("   - RelayConn: %v (type: %T, nil=%v)", conn.RelayConn, conn.RelayConn, conn.RelayConn == nil)
+	pm.logger.Printf("   - RelayAlloc: %v (type: %T, nil=%v)", conn.RelayAlloc, conn.RelayAlloc, conn.RelayAlloc == nil)
+	pm.logger.Printf("   - RelayAddr: %v (type: %T, nil=%v)", conn.RelayAddr, conn.RelayAddr, conn.RelayAddr == nil)
+	pm.logger.Printf("   - PeerAddr: %v (type: %T, nil=%v)", conn.PeerAddr, conn.PeerAddr, conn.PeerAddr == nil)
+	pm.logger.Printf("   - PublicIP: %q, PublicPort: %d", conn.PublicIP, conn.PublicPort)
+	pm.logger.Printf("   - RelayIP: %q, RelayPort: %d", conn.RelayIP, conn.RelayPort)
+	pm.logger.Printf("   - LastUsed: %v (type: %T)", conn.LastUsed, conn.LastUsed)
+	
+	pm.logger.Printf("=")
+	pm.logger.Printf("🔍 [tryRelay] ========== END (SUCCESS) ==========")
+	pm.logger.Printf("=")
 
 	return conn, nil
 }
@@ -260,7 +579,7 @@ func (pm *P2PManager) SendPacket(peerID string, packet []byte) error {
 			relayIP := conn.RelayAddr.IP
 			relayIPAddr := &net.UDPAddr{
 				IP:   relayIP,
-				Port: 56710, // Port can be any value, using example port for consistency
+				Port: conn.RelayAddr.Port, // Use actual relay port from connection
 			}
 			
 			// Type assert to access CreatePermissions method

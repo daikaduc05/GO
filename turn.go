@@ -25,11 +25,12 @@ type TURNAllocation interface {
 
 // TURNClient handles TURN relay connection
 type TURNClient struct {
-	config     *Config
-	client     *turn.Client
-	allocation net.PacketConn // For backward compatibility (used as PacketConn)
+	config        *Config
+	client        *turn.Client
+	udpConn       *net.UDPConn // UDP connection for TURN (may be separate from STUN)
+	allocation    net.PacketConn // For backward compatibility (used as PacketConn)
 	allocationObj TURNAllocation // Store actual allocation object for CreatePermissions/WriteTo
-	logger     *log.Logger
+	logger        *log.Logger
 }
 
 // NewTURNClient creates a new TURN client
@@ -50,6 +51,21 @@ func (tc *TURNClient) Connect(udpConn *net.UDPConn) error {
 	tc.logger.Printf("Connecting to TURN server: %s", tc.config.TURNServer)
 	tc.logger.Printf("Username: %s, Realm: %s", tc.config.TURNUser, tc.config.TURNRealm)
 
+	// CRITICAL: Create a fresh UDP connection for TURN (like reference code)
+	// This prevents any deadlines or state from STUN operations affecting TURN
+	// The reference code creates a new connection: net.ListenPacket("udp4", "0.0.0.0:0")
+	tc.logger.Printf("🔧 Creating fresh UDP connection for TURN (to avoid STUN deadlines)...")
+	turnUDPConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		tc.logger.Printf("⚠️  Failed to create fresh UDP connection for TURN, using provided connection: %v", err)
+		tc.udpConn = udpConn // Fallback to provided connection
+		turnUDPConn = udpConn
+	} else {
+		tc.logger.Printf("✅ Fresh UDP connection created for TURN: %s", turnUDPConn.LocalAddr())
+		// Store it for cleanup and refresh operations
+		tc.udpConn = turnUDPConn
+	}
+
 	// Create TURN client config
 	// The pion/turn/v2 library automatically handles:
 	// - 401 challenge-response
@@ -61,7 +77,7 @@ func (tc *TURNClient) Connect(udpConn *net.UDPConn) error {
 		TURNServerAddr: tc.config.TURNServer,
 		Username:       tc.config.TURNUser,
 		Password:       tc.config.TURNPass,
-		Conn:           udpConn,
+		Conn:           turnUDPConn,
 	}
 
 	// Set realm if configured
@@ -151,6 +167,7 @@ func (tc *TURNClient) Connect(udpConn *net.UDPConn) error {
 		// Assign allocation to struct fields
 		tc.allocation = result.conn
 		tc.allocationObj = allocObj
+		// Note: tc.udpConn already set when creating fresh connection above (line 64)
 		
 		// Verify allocation was saved successfully
 		if tc.allocation == nil {
@@ -158,6 +175,28 @@ func (tc *TURNClient) Connect(udpConn *net.UDPConn) error {
 		}
 		if tc.allocationObj == nil {
 			return fmt.Errorf("TURN allocation object is nil after assignment to struct")
+		}
+		
+		// CRITICAL: Clear any deadlines immediately after allocation
+		// The shared UDP connection might have deadlines from STUN operations
+		// These deadlines will cause immediate timeout when calling CreatePermissions/WriteTo
+		tc.logger.Printf("🔧 Clearing any deadlines on allocation (critical for CreatePermissions)...")
+		if deadlineConn, ok := result.conn.(interface {
+			SetReadDeadline(time.Time) error
+			SetWriteDeadline(time.Time) error
+		}); ok {
+			if err := deadlineConn.SetReadDeadline(time.Time{}); err != nil {
+				tc.logger.Printf("⚠️  Warning: failed to clear read deadline: %v", err)
+			} else {
+				tc.logger.Printf("   ✅ Read deadline cleared")
+			}
+			if err := deadlineConn.SetWriteDeadline(time.Time{}); err != nil {
+				tc.logger.Printf("⚠️  Warning: failed to clear write deadline: %v", err)
+			} else {
+				tc.logger.Printf("   ✅ Write deadline cleared")
+			}
+		} else {
+			tc.logger.Printf("   ⚠️  Allocation does not support deadline methods")
 		}
 		
 		relayAddr := result.conn.LocalAddr()
