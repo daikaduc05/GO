@@ -38,6 +38,33 @@ type P2PManager struct {
 	logger      *log.Logger
 }
 
+// isPrivateOrLinkLocalIP returns true if ip is RFC1918 private, link-local, loopback or unspecified
+func isPrivateOrLinkLocalIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		// RFC1918 private ranges
+		if v4[0] == 10 {
+			return true
+		}
+		if v4[0] == 172 && v4[1] >= 16 && v4[1] <= 31 {
+			return true
+		}
+		if v4[0] == 192 && v4[1] == 168 {
+			return true
+		}
+		// Carrier-Grade NAT 100.64.0.0/10
+		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+			return true
+		}
+	}
+	return false
+}
+
 // NewP2PManager creates a new P2P connection manager
 func NewP2PManager(localConn net.PacketConn, turnClient *TURNClient) *P2PManager {
 	return &P2PManager{
@@ -63,6 +90,10 @@ func (pm *P2PManager) Connect(peerID string, peerInfo PeerInfo) (*P2PConnection,
 	if err == nil {
 		pm.connections[peerID] = conn
 		pm.logger.Printf("✅ P2P connection established via hole punching: %s", peerID)
+		
+		// Send keep-alive packet to maintain connection
+		pm.sendKeepAlivePermission(conn)
+		
 		return conn, nil
 	}
 
@@ -76,6 +107,10 @@ func (pm *P2PManager) Connect(peerID string, peerInfo PeerInfo) (*P2PConnection,
 
 	pm.connections[peerID] = conn
 	pm.logger.Printf("✅ P2P connection established via relay: %s", peerID)
+	
+	// Send permission packet to keep alive relation with peer
+	pm.sendKeepAlivePermission(conn)
+	
 	return conn, nil
 }
 
@@ -236,6 +271,22 @@ func (pm *P2PManager) tryRelay(peerID string, peerInfo PeerInfo) (*P2PConnection
 		pm.logger.Printf("   - Port: %d (type: %T)", relayAddr.Port, relayAddr.Port)
 		pm.logger.Printf("   - Zone: %s", relayAddr.Zone)
 		pm.logger.Printf("   - String(): %s", relayAddr.String())
+	}
+
+	// Guard: if peer's relay IP is private/link-local (e.g., server's internal IP), fall back to peer's public IP
+	if isPrivateOrLinkLocalIP(relayAddr.IP) {
+		pm.logger.Printf("   ⚠️  Relay IP appears private/link-local: %s. Falling back to peer PublicIP if available...", relayAddr.IP.String())
+		if peerInfo.PublicIP != "" && peerInfo.PublicPort != 0 {
+			fallbackStr := fmt.Sprintf("%s:%d", peerInfo.PublicIP, peerInfo.PublicPort)
+			if fb, err2 := net.ResolveUDPAddr("udp", fallbackStr); err2 == nil {
+				pm.logger.Printf("   🔄 Using PublicIP as target for permission/send: %s", fb.String())
+				relayAddr = fb
+			} else {
+				pm.logger.Printf("   ⚠️  Failed to resolve fallback PublicIP %q: %v", fallbackStr, err2)
+			}
+		} else {
+			pm.logger.Printf("   ⚠️  No PublicIP available to fall back")
+		}
 	}
 
 	pm.logger.Printf("🔍 [tryRelay] Resolving public address (for matching)...")
@@ -583,7 +634,7 @@ func (pm *P2PManager) SendPacket(peerID string, packet []byte) error {
 		permissionAge := time.Since(conn.PermissionTime)
 		conn.mu.RUnlock()
 		
-		if needsPermission && conn.RelayAlloc != nil {
+		if needsPermission && conn.RelayConn != nil {
 			relayIP := conn.RelayAddr.IP
 			relayIPAddr := &net.UDPAddr{
 				IP:   relayIP,
@@ -596,7 +647,7 @@ func (pm *P2PManager) SendPacket(peerID string, packet []byte) error {
 				CreatePermissions(addrs ...net.Addr) error
 			}
 			
-			if alloc, ok := conn.RelayAlloc.(allocationWithPermissions); ok {
+			if alloc, ok := conn.RelayConn.(allocationWithPermissions); ok {
 				if conn.PermissionTime.IsZero() {
 					pm.logger.Printf("🔐 [SendPacket] Creating permission for %s (first time)", relayIP.String())
 				} else {
@@ -656,6 +707,102 @@ func (pm *P2PManager) SendPacket(peerID string, packet []byte) error {
 	}
 
 	return nil
+}
+
+// sendKeepAlivePermission sends a permission packet to keep alive the relation with a peer
+func (pm *P2PManager) sendKeepAlivePermission(conn *P2PConnection) {
+	if conn == nil {
+		return
+	}
+
+	// Handle relay connections (need TURN permissions)
+	if conn.Method == MethodRelay {
+		pm.sendRelayKeepAlive(conn)
+	} else if conn.Method == MethodHole {
+		// Handle hole punching connections (just send keep-alive packet)
+		pm.sendHolePunchKeepAlive(conn)
+	}
+}
+
+// sendRelayKeepAlive sends permission packet for relay connections
+func (pm *P2PManager) sendRelayKeepAlive(conn *P2PConnection) {
+	if conn.RelayConn == nil || conn.RelayAddr == nil {
+		pm.logger.Printf("⚠️  Cannot send keep-alive permission: missing relay connection or address")
+		return
+	}
+
+	conn.mu.Lock()
+	// Refresh permission if needed (permissions expire after 5 minutes)
+	needsPermission := conn.PermissionTime.IsZero() || time.Since(conn.PermissionTime) > 4*time.Minute
+	conn.mu.Unlock()
+
+	if needsPermission {
+		relayIP := conn.RelayAddr.IP
+		relayIPAddr := &net.UDPAddr{
+			IP:   relayIP,
+			Port: conn.RelayAddr.Port,
+		}
+
+		// Type assert to access CreatePermissions method
+		type allocationWithPermissions interface {
+			net.PacketConn
+			CreatePermissions(addrs ...net.Addr) error
+		}
+
+		if alloc, ok := conn.RelayConn.(allocationWithPermissions); ok {
+			pm.logger.Printf("🔐 [KeepAlive] Refreshing permission for peer %s", conn.PeerID)
+			if err := alloc.CreatePermissions(relayIPAddr); err != nil {
+				pm.logger.Printf("⚠️  Failed to refresh permission for peer %s: %v", conn.PeerID, err)
+				// Continue anyway - permission might still be valid
+			} else {
+				conn.mu.Lock()
+				conn.PermissionTime = time.Now()
+				conn.mu.Unlock()
+				pm.logger.Printf("✅ [KeepAlive] Permission refreshed successfully for peer %s", conn.PeerID)
+			}
+		}
+	}
+
+	// Send a small keep-alive packet through the relay connection
+	keepAlivePacket := []byte(fmt.Sprintf("KEEPALIVE-%d", time.Now().Unix()))
+	pm.logger.Printf("💓 [KeepAlive] Sending keep-alive packet to peer %s via relay", conn.PeerID)
+	
+	// Clear write deadline before sending
+	if connWithDeadline, ok := conn.RelayConn.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		connWithDeadline.SetWriteDeadline(time.Time{})
+	}
+
+	_, err := conn.RelayConn.WriteTo(keepAlivePacket, conn.RelayAddr)
+	if err != nil {
+		pm.logger.Printf("⚠️  Failed to send keep-alive packet to peer %s: %v", conn.PeerID, err)
+	} else {
+		pm.logger.Printf("✅ [KeepAlive] Keep-alive packet sent successfully to peer %s", conn.PeerID)
+		conn.mu.Lock()
+		conn.LastUsed = time.Now()
+		conn.mu.Unlock()
+	}
+}
+
+// sendHolePunchKeepAlive sends keep-alive packet for hole punching connections
+func (pm *P2PManager) sendHolePunchKeepAlive(conn *P2PConnection) {
+	if conn.Conn == nil || conn.PeerAddr == nil {
+		pm.logger.Printf("⚠️  Cannot send keep-alive: missing connection or peer address")
+		return
+	}
+
+	// Send a small keep-alive packet through the hole punching connection
+	keepAlivePacket := []byte(fmt.Sprintf("KEEPALIVE-%d", time.Now().Unix()))
+	pm.logger.Printf("💓 [KeepAlive] Sending keep-alive packet to peer %s via hole punching", conn.PeerID)
+	
+	_, err := conn.Conn.WriteTo(keepAlivePacket, conn.PeerAddr)
+	if err != nil {
+		pm.logger.Printf("⚠️  Failed to send keep-alive packet to peer %s: %v", conn.PeerID, err)
+	} else {
+		pm.logger.Printf("✅ [KeepAlive] Keep-alive packet sent successfully to peer %s", conn.PeerID)
+		conn.mu.Lock()
+		conn.LastUsed = time.Now()
+		conn.mu.Unlock()
+	}
 }
 
 // StartPacketReceiver starts receiving packets from P2P connections
