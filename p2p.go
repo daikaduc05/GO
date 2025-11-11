@@ -805,6 +805,93 @@ func (pm *P2PManager) sendHolePunchKeepAlive(conn *P2PConnection) {
 	}
 }
 
+// PrepareRelayPermission proactively creates TURN permission for a peer without sending traffic.
+// Useful when both peers just came online and no packets have flowed yet.
+func (pm *P2PManager) PrepareRelayPermission(peerID string, peerInfo PeerInfo) error {
+	if pm.turnClient == nil {
+		return fmt.Errorf("TURN client not available")
+	}
+	if peerInfo.RelayIP == "" || peerInfo.RelayPort == 0 {
+		return fmt.Errorf("peer has no relay IP/port")
+	}
+
+	allocation := pm.turnClient.GetAllocation()
+	if allocation == nil {
+		return fmt.Errorf("TURN allocation not available")
+	}
+
+	relayAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", peerInfo.RelayIP, peerInfo.RelayPort))
+	if err != nil {
+		return fmt.Errorf("failed to resolve relay address: %w", err)
+	}
+
+	// Guard against private/link-local relay IPs; fall back to peer public address if available
+	if isPrivateOrLinkLocalIP(relayAddr.IP) && peerInfo.PublicIP != "" && peerInfo.PublicPort != 0 {
+		if fb, err2 := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", peerInfo.PublicIP, peerInfo.PublicPort)); err2 == nil {
+			relayAddr = fb
+		}
+	}
+
+	type allocationWithPermissions interface {
+		net.PacketConn
+		CreatePermissions(addrs ...net.Addr) error
+	}
+	alloc, ok := allocation.(allocationWithPermissions)
+	if !ok {
+		return fmt.Errorf("allocation does not support CreatePermissions")
+	}
+
+	peerAddrForPermission := &net.UDPAddr{IP: relayAddr.IP, Port: relayAddr.Port}
+	// Clear deadline to avoid spurious timeouts
+	if conn, ok := allocation.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		conn.SetWriteDeadline(time.Time{})
+	}
+	if err := alloc.CreatePermissions(peerAddrForPermission); err != nil {
+		if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "i/o timeout") {
+			pm.logger.Printf("⚠️  [PrepareRelayPermission] Timeout during CreatePermissions for %s (continuing)", peerAddrForPermission)
+		} else {
+			return fmt.Errorf("failed to create TURN permission: %w", err)
+		}
+	}
+
+	// Save or update lightweight connection entry so later sends can reuse it
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if existing, ok := pm.connections[peerID]; ok {
+		existing.mu.Lock()
+		existing.Method = MethodRelay
+		existing.Status = StatusConnected
+		existing.RelayConn = allocation
+		existing.RelayAlloc = pm.turnClient.GetAllocationObj()
+		existing.RelayAddr = relayAddr
+		existing.PermissionTime = time.Now()
+		existing.PublicIP = peerInfo.PublicIP
+		existing.PublicPort = peerInfo.PublicPort
+		existing.RelayIP = peerInfo.RelayIP
+		existing.RelayPort = peerInfo.RelayPort
+		existing.LastUsed = time.Now()
+		existing.mu.Unlock()
+	} else {
+		pm.connections[peerID] = &P2PConnection{
+			PeerID:         peerID,
+			Method:         MethodRelay,
+			Status:         StatusConnected,
+			RelayConn:      allocation,
+			RelayAlloc:     pm.turnClient.GetAllocationObj(),
+			RelayAddr:      relayAddr,
+			PeerAddr:       nil,
+			PublicIP:       peerInfo.PublicIP,
+			PublicPort:     peerInfo.PublicPort,
+			RelayIP:        peerInfo.RelayIP,
+			RelayPort:      peerInfo.RelayPort,
+			PermissionTime: time.Now(),
+			LastUsed:       time.Now(),
+		}
+	}
+	pm.logger.Printf("✅ [PrepareRelayPermission] Prepared TURN permission for peer %s at %s", peerID, relayAddr.String())
+	return nil
+}
+
 // StartPacketReceiver starts receiving packets from P2P connections
 func (pm *P2PManager) StartPacketReceiver(onPacket func(peerID string, packet []byte)) {
 	// Receiver for hole punching (UDP)

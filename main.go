@@ -206,6 +206,17 @@ func main() {
 				peerCacheMu.Unlock()
 				log.Printf("📢 Peer online: %s (%s) - virtual_ip=%s", 
 					notif.Peer.PeerID, notif.Peer.Email, notif.Peer.VirtualIP)
+
+				// Proactively create TURN permission so that relay path is ready even before traffic
+				if notif.Peer.RelayIP != "" && notif.Peer.RelayPort != 0 {
+					if err := p2pManager.PrepareRelayPermission(notif.Peer.PeerID, notif.Peer); err != nil {
+						log.Printf("⚠️  PrepareRelayPermission failed for %s: %v", notif.Peer.PeerID, err)
+					} else {
+						log.Printf("✅ PrepareRelayPermission succeeded for %s (%s:%d)", notif.Peer.PeerID, notif.Peer.RelayIP, notif.Peer.RelayPort)
+					}
+				} else {
+					log.Printf("⚠️  Peer %s has no relay info; skipping permission prepare", notif.Peer.PeerID)
+				}
 			}
 		case "peer_offline":
 			// Handle peer offline
