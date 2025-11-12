@@ -27,7 +27,8 @@ type P2PConnection struct {
 	PermissionTime time.Time // When permission was last created (to avoid spam)
 	LastUsed      time.Time
 	mu            sync.RWMutex
-	keepAliveOnce sync.Once
+	relayKeepAliveOnce sync.Once
+	holeKeepAliveOnce  sync.Once
 }
 
 type allocationWithPermissions interface {
@@ -99,7 +100,7 @@ func (pm *P2PManager) Connect(peerID string, peerInfo PeerInfo) (*P2PConnection,
 		
 		// Send keep-alive packet to maintain connection
 		pm.sendKeepAlivePermission(conn)
-		pm.startRelayKeepAlive(conn)
+		pm.startHoleKeepAlive(conn)
 		
 		return conn, nil
 	}
@@ -721,9 +722,11 @@ func (pm *P2PManager) sendKeepAlivePermission(conn *P2PConnection) {
 	// Handle relay connections (need TURN permissions)
 	if conn.Method == MethodRelay {
 		pm.sendRelayKeepAlive(conn)
+		pm.startRelayKeepAlive(conn)
 	} else if conn.Method == MethodHole {
 		// Handle hole punching connections (just send keep-alive packet)
 		pm.sendHolePunchKeepAlive(conn)
+		pm.startHoleKeepAlive(conn)
 	}
 }
 
@@ -811,7 +814,7 @@ func (pm *P2PManager) startRelayKeepAlive(conn *P2PConnection) {
 		return
 	}
 
-	conn.keepAliveOnce.Do(func() {
+	conn.relayKeepAliveOnce.Do(func() {
 		go func() {
 			ticker := time.NewTicker(20 * time.Second)
 			defer ticker.Stop()
@@ -831,6 +834,45 @@ func (pm *P2PManager) startRelayKeepAlive(conn *P2PConnection) {
 				}
 
 				pm.sendRelayKeepAlive(conn)
+			}
+		}()
+	})
+}
+
+// startHoleKeepAlive launches a goroutine that sends UDP keep-alive packets every 20 seconds
+// to maintain NAT binding for hole-punched peers.
+func (pm *P2PManager) startHoleKeepAlive(conn *P2PConnection) {
+	if conn == nil {
+		return
+	}
+
+	conn.mu.RLock()
+	method := conn.Method
+	conn.mu.RUnlock()
+	if method != MethodHole {
+		return
+	}
+
+	conn.holeKeepAliveOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(20 * time.Second)
+			defer ticker.Stop()
+
+			for range ticker.C {
+				conn.mu.RLock()
+				currentStatus := conn.Status
+				currentMethod := conn.Method
+				conn.mu.RUnlock()
+
+				if currentStatus != StatusConnected {
+					return
+				}
+
+				if currentMethod != MethodHole {
+					continue
+				}
+
+				pm.sendHolePunchKeepAlive(conn)
 			}
 		}()
 	})
