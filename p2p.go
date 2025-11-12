@@ -30,6 +30,11 @@ type P2PConnection struct {
 	keepAliveOnce sync.Once
 }
 
+type allocationWithPermissions interface {
+	net.PacketConn
+	CreatePermissions(addrs ...net.Addr) error
+}
+
 // P2PManager manages all P2P connections
 type P2PManager struct {
 	connections map[string]*P2PConnection
@@ -645,11 +650,6 @@ func (pm *P2PManager) SendPacket(peerID string, packet []byte) error {
 			}
 			
 			// Type assert to access CreatePermissions method
-			type allocationWithPermissions interface {
-				net.PacketConn
-				CreatePermissions(addrs ...net.Addr) error
-			}
-			
 			if alloc, ok := conn.RelayConn.(allocationWithPermissions); ok {
 				if conn.PermissionTime.IsZero() {
 					pm.logger.Printf("🔐 [SendPacket] Creating permission for %s (first time)", relayIP.String())
@@ -734,55 +734,44 @@ func (pm *P2PManager) sendRelayKeepAlive(conn *P2PConnection) {
 		return
 	}
 
-	conn.mu.Lock()
-	// Refresh permission if needed (permissions expire after 5 minutes)
-	needsPermission := conn.PermissionTime.IsZero() || time.Since(conn.PermissionTime) > 4*time.Minute
-	conn.mu.Unlock()
-
-	if needsPermission {
-		relayIP := conn.RelayAddr.IP
-		relayIPAddr := &net.UDPAddr{
-			IP:   relayIP,
-			Port: conn.RelayAddr.Port,
-		}
-
-		// Type assert to access CreatePermissions method
-		type allocationWithPermissions interface {
-			net.PacketConn
-			CreatePermissions(addrs ...net.Addr) error
-		}
-
-		if alloc, ok := conn.RelayConn.(allocationWithPermissions); ok {
-			pm.logger.Printf("🔐 [KeepAlive] Refreshing permission for peer %s", conn.PeerID)
-			if err := alloc.CreatePermissions(relayIPAddr); err != nil {
-				pm.logger.Printf("⚠️  Failed to refresh permission for peer %s: %v", conn.PeerID, err)
-				// Continue anyway - permission might still be valid
-			} else {
-				conn.mu.Lock()
-				conn.PermissionTime = time.Now()
-				conn.mu.Unlock()
-				pm.logger.Printf("✅ [KeepAlive] Permission refreshed successfully for peer %s", conn.PeerID)
-			}
-		}
+	relayIPAddr := &net.UDPAddr{
+		IP:   conn.RelayAddr.IP,
+		Port: conn.RelayAddr.Port,
 	}
 
-	// Send a small keep-alive packet through the relay connection
-	keepAlivePacket := []byte(fmt.Sprintf("KEEPALIVE-%d", time.Now().Unix()))
-	pm.logger.Printf("💓 [KeepAlive] Sending keep-alive packet to peer %s via relay", conn.PeerID)
-	
-	// Clear write deadline before sending
+	if alloc, ok := conn.RelayConn.(allocationWithPermissions); ok {
+		conn.mu.RLock()
+		lastPermission := conn.PermissionTime
+		conn.mu.RUnlock()
+
+		pm.logger.Printf("🔄 [KeepAlive] Reinforcing TURN permission for peer %s (last updated: %v)", conn.PeerID, lastPermission)
+		if err := alloc.CreatePermissions(relayIPAddr); err != nil {
+			pm.logger.Printf("⚠️  Failed to reinforce TURN permission for peer %s: %v", conn.PeerID, err)
+		} else {
+			now := time.Now()
+			conn.mu.Lock()
+			conn.PermissionTime = now
+			conn.mu.Unlock()
+			pm.logger.Printf("✅ [KeepAlive] TURN permission refreshed for peer %s at %v", conn.PeerID, now)
+		}
+	} else {
+		pm.logger.Printf("⚠️  Relay connection for peer %s does not support CreatePermissions", conn.PeerID)
+	}
+
+	keepAlivePacket := []byte(fmt.Sprintf("KEEPALIVE-%d", time.Now().UnixNano()))
+	pm.logger.Printf("💓 [KeepAlive] Sending TURN keep-alive packet to peer %s via relay %s", conn.PeerID, conn.RelayAddr)
+
 	if connWithDeadline, ok := conn.RelayConn.(interface{ SetWriteDeadline(time.Time) error }); ok {
 		connWithDeadline.SetWriteDeadline(time.Time{})
 	}
 
-	_, err := conn.RelayConn.WriteTo(keepAlivePacket, conn.RelayAddr)
-	if err != nil {
-		pm.logger.Printf("⚠️  Failed to send keep-alive packet to peer %s: %v", conn.PeerID, err)
+	if _, err := conn.RelayConn.WriteTo(keepAlivePacket, conn.RelayAddr); err != nil {
+		pm.logger.Printf("⚠️  TURN keep-alive send error for peer %s: %v", conn.PeerID, err)
 	} else {
-		pm.logger.Printf("✅ [KeepAlive] Keep-alive packet sent successfully to peer %s", conn.PeerID)
 		conn.mu.Lock()
 		conn.LastUsed = time.Now()
 		conn.mu.Unlock()
+		pm.logger.Printf("✅ [KeepAlive] TURN keep-alive sent for peer %s", conn.PeerID)
 	}
 }
 
