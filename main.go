@@ -194,6 +194,19 @@ func main() {
 	// Create P2P manager
 	p2pManager := NewP2PManager(udpConn, turnClient)
 
+	// Proactively prepare TURN permissions for existing peers with relay info
+	for _, peer := range registerResponse.ExistingPeers {
+		if peer.RelayIP != "" && peer.RelayPort != 0 {
+			if err := p2pManager.PrepareRelayPermission(peer.PeerID, peer); err != nil {
+				log.Printf("⚠️  PrepareRelayPermission failed for existing peer %s: %v", peer.PeerID, err)
+			} else {
+				log.Printf("✅ PrepareRelayPermission succeeded for existing peer %s (%s:%d)", peer.PeerID, peer.RelayIP, peer.RelayPort)
+			}
+		} else {
+			log.Printf("ℹ️  Existing peer %s has no relay info; skipping TURN permission prepare", peer.PeerID)
+		}
+	}
+
 	// Step 6.7: Handle incoming messages (peer_online notifications, etc.)
 	signaling.StartMessageHandler(func(msg SignalingMessage) {
 		switch msg.Type {
