@@ -27,6 +27,7 @@ type P2PConnection struct {
 	PermissionTime time.Time // When permission was last created (to avoid spam)
 	LastUsed      time.Time
 	mu            sync.RWMutex
+	keepAliveOnce sync.Once
 }
 
 // P2PManager manages all P2P connections
@@ -93,6 +94,7 @@ func (pm *P2PManager) Connect(peerID string, peerInfo PeerInfo) (*P2PConnection,
 		
 		// Send keep-alive packet to maintain connection
 		pm.sendKeepAlivePermission(conn)
+		pm.startRelayKeepAlive(conn)
 		
 		return conn, nil
 	}
@@ -110,6 +112,7 @@ func (pm *P2PManager) Connect(peerID string, peerInfo PeerInfo) (*P2PConnection,
 	
 	// Send permission packet to keep alive relation with peer
 	pm.sendKeepAlivePermission(conn)
+	pm.startRelayKeepAlive(conn)
 	
 	return conn, nil
 }
@@ -805,6 +808,45 @@ func (pm *P2PManager) sendHolePunchKeepAlive(conn *P2PConnection) {
 	}
 }
 
+// startRelayKeepAlive launches a goroutine that sends relay keep-alive packets every minute
+// to maintain TURN permissions and keep the relay address active.
+func (pm *P2PManager) startRelayKeepAlive(conn *P2PConnection) {
+	if conn == nil {
+		return
+	}
+
+	conn.mu.RLock()
+	method := conn.Method
+	conn.mu.RUnlock()
+	if method != MethodRelay {
+		return
+	}
+
+	conn.keepAliveOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(1 * time.Minute)
+			defer ticker.Stop()
+
+			for range ticker.C {
+				conn.mu.RLock()
+				currentStatus := conn.Status
+				currentMethod := conn.Method
+				conn.mu.RUnlock()
+
+				if currentStatus != StatusConnected {
+					return
+				}
+
+				if currentMethod != MethodRelay {
+					continue
+				}
+
+				pm.sendRelayKeepAlive(conn)
+			}
+		}()
+	})
+}
+
 // PrepareRelayPermission proactively creates TURN permission for a peer without sending traffic.
 // Useful when both peers just came online and no packets have flowed yet.
 func (pm *P2PManager) PrepareRelayPermission(peerID string, peerInfo PeerInfo) error {
@@ -856,23 +898,24 @@ func (pm *P2PManager) PrepareRelayPermission(peerID string, peerInfo PeerInfo) e
 
 	// Save or update lightweight connection entry so later sends can reuse it
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
+	var connEntry *P2PConnection
 	if existing, ok := pm.connections[peerID]; ok {
-		existing.mu.Lock()
-		existing.Method = MethodRelay
-		existing.Status = StatusConnected
-		existing.RelayConn = allocation
-		existing.RelayAlloc = pm.turnClient.GetAllocationObj()
-		existing.RelayAddr = relayAddr
-		existing.PermissionTime = time.Now()
-		existing.PublicIP = peerInfo.PublicIP
-		existing.PublicPort = peerInfo.PublicPort
-		existing.RelayIP = peerInfo.RelayIP
-		existing.RelayPort = peerInfo.RelayPort
-		existing.LastUsed = time.Now()
-		existing.mu.Unlock()
+		connEntry = existing
+		connEntry.mu.Lock()
+		connEntry.Method = MethodRelay
+		connEntry.Status = StatusConnected
+		connEntry.RelayConn = allocation
+		connEntry.RelayAlloc = pm.turnClient.GetAllocationObj()
+		connEntry.RelayAddr = relayAddr
+		connEntry.PermissionTime = time.Now()
+		connEntry.PublicIP = peerInfo.PublicIP
+		connEntry.PublicPort = peerInfo.PublicPort
+		connEntry.RelayIP = peerInfo.RelayIP
+		connEntry.RelayPort = peerInfo.RelayPort
+		connEntry.LastUsed = time.Now()
+		connEntry.mu.Unlock()
 	} else {
-		pm.connections[peerID] = &P2PConnection{
+		connEntry = &P2PConnection{
 			PeerID:         peerID,
 			Method:         MethodRelay,
 			Status:         StatusConnected,
@@ -887,7 +930,12 @@ func (pm *P2PManager) PrepareRelayPermission(peerID string, peerInfo PeerInfo) e
 			PermissionTime: time.Now(),
 			LastUsed:       time.Now(),
 		}
+		pm.connections[peerID] = connEntry
 	}
+	pm.mu.Unlock()
+
+	pm.startRelayKeepAlive(connEntry)
+
 	pm.logger.Printf("✅ [PrepareRelayPermission] Prepared TURN permission for peer %s at %s", peerID, relayAddr.String())
 	return nil
 }
