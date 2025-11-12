@@ -808,7 +808,7 @@ func (pm *P2PManager) sendHolePunchKeepAlive(conn *P2PConnection) {
 	}
 }
 
-// startRelayKeepAlive launches a goroutine that sends relay keep-alive packets every minute
+// startRelayKeepAlive launches a goroutine that sends relay keep-alive packets every 20 seconds
 // to maintain TURN permissions and keep the relay address active.
 func (pm *P2PManager) startRelayKeepAlive(conn *P2PConnection) {
 	if conn == nil {
@@ -824,7 +824,7 @@ func (pm *P2PManager) startRelayKeepAlive(conn *P2PConnection) {
 
 	conn.keepAliveOnce.Do(func() {
 		go func() {
-			ticker := time.NewTicker(1 * time.Minute)
+			ticker := time.NewTicker(20 * time.Second)
 			defer ticker.Stop()
 
 			for range ticker.C {
