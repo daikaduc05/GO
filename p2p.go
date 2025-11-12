@@ -878,9 +878,36 @@ func (pm *P2PManager) startHoleKeepAlive(conn *P2PConnection) {
 	})
 }
 
-// PrepareRelayPermission proactively creates TURN permission for a peer without sending traffic.
+// PrepareRelayPermission proactively prepares connection to a peer.
+// First tries NAT hole punching, only falls back to relay if hole punching fails.
 // Useful when both peers just came online and no packets have flowed yet.
 func (pm *P2PManager) PrepareRelayPermission(peerID string, peerInfo PeerInfo) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	// Check if already connected
+	if conn, exists := pm.connections[peerID]; exists && conn.Status == StatusConnected {
+		pm.logger.Printf("ℹ️  [PrepareRelayPermission] Peer %s already connected via %s", peerID, conn.Method)
+		return nil
+	}
+
+	// Try hole punching first
+	pm.logger.Printf("🔍 [PrepareRelayPermission] Attempting NAT hole punching for peer %s...", peerID)
+	conn, err := pm.tryHolePunching(peerID, peerInfo)
+	if err == nil {
+		pm.connections[peerID] = conn
+		pm.logger.Printf("✅ [PrepareRelayPermission] NAT hole punching succeeded for peer %s", peerID)
+		
+		// Send keep-alive packet to maintain connection
+		pm.sendKeepAlivePermission(conn)
+		pm.startHoleKeepAlive(conn)
+		
+		return nil
+	}
+
+	pm.logger.Printf("⚠️  [PrepareRelayPermission] NAT hole punching failed for %s: %v, falling back to relay...", peerID, err)
+
+	// Fallback to relay: create TURN permission
 	if pm.turnClient == nil {
 		return fmt.Errorf("TURN client not available")
 	}
@@ -928,7 +955,6 @@ func (pm *P2PManager) PrepareRelayPermission(peerID string, peerInfo PeerInfo) e
 	}
 
 	// Save or update lightweight connection entry so later sends can reuse it
-	pm.mu.Lock()
 	var connEntry *P2PConnection
 	if existing, ok := pm.connections[peerID]; ok {
 		connEntry = existing
@@ -963,11 +989,11 @@ func (pm *P2PManager) PrepareRelayPermission(peerID string, peerInfo PeerInfo) e
 		}
 		pm.connections[peerID] = connEntry
 	}
-	pm.mu.Unlock()
 
+	pm.sendKeepAlivePermission(connEntry)
 	pm.startRelayKeepAlive(connEntry)
 
-	pm.logger.Printf("✅ [PrepareRelayPermission] Prepared TURN permission for peer %s at %s", peerID, relayAddr.String())
+	pm.logger.Printf("✅ [PrepareRelayPermission] Prepared TURN relay permission for peer %s at %s", peerID, relayAddr.String())
 	return nil
 }
 
