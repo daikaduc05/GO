@@ -220,18 +220,30 @@ func main() {
 			}
 		case "peer_offline":
 			// Handle peer offline
-			var notif PeerOnlineNotification
-			if err := json.Unmarshal(msg.Raw, &notif); err == nil {
-				log.Printf("📢 Peer offline: %s", notif.Peer.PeerID)
-				p2pManager.RemoveConnection(notif.Peer.PeerID)
-				connCache.Remove(notif.Peer.PeerID)
-				peerCacheMu.Lock()
-				delete(peerCache, notif.Peer.PeerID)
-				delete(virtualIPMap, notif.Peer.VirtualIP)
-				peerCacheMu.Unlock()
-			} else {
-				log.Printf("📢 Peer offline notification received")
+			var notif PeerOfflineNotification
+			if err := json.Unmarshal(msg.Raw, &notif); err != nil {
+				log.Printf("⚠️  Failed to parse peer_offline notification: %v", err)
+				break
 			}
+
+			log.Printf("📢 Peer offline: peer_id=%s user_id=%d virtual_ip=%s", notif.PeerID, notif.UserID, notif.VirtualIP)
+
+			// Tear down any active P2P connections
+			p2pManager.RemoveConnection(notif.PeerID)
+			connCache.Remove(notif.PeerID)
+
+			// Remove peer info from caches/maps
+			peerCacheMu.Lock()
+			if peer, exists := peerCache[notif.PeerID]; exists {
+				delete(virtualIPMap, peer.VirtualIP)
+			}
+			if notif.VirtualIP != "" {
+				delete(virtualIPMap, notif.VirtualIP)
+			}
+			delete(peerCache, notif.PeerID)
+			peerCacheMu.Unlock()
+
+			log.Printf("✅ Cleanup completed for offline peer %s", notif.PeerID)
 		default:
 			log.Printf("📨 Received message: type=%s", msg.Type)
 		}

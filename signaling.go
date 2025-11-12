@@ -70,6 +70,14 @@ type PeerOnlineNotification struct {
 	Peer PeerInfo `json:"peer"`
 }
 
+// PeerOfflineNotification represents peer offline notification
+type PeerOfflineNotification struct {
+	Type      string `json:"type"`
+	PeerID    string `json:"peer_id"`
+	UserID    int    `json:"user_id"`
+	VirtualIP string `json:"virtual_ip"`
+}
+
 // NewSignalingClient creates a new signaling client
 func NewSignalingClient(config *Config) *SignalingClient {
 	return &SignalingClient{
